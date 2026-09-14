@@ -32,6 +32,7 @@ import html
 import http.client
 import http.cookies
 import http.server
+import ipaddress
 import json
 import os
 import re
@@ -327,6 +328,34 @@ def save_template_names(info):
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(text)
     os.replace(tmp, TEMPLATE_NAMES)
+    return True
+
+
+# Who each allowed address belongs to, as the panel knows them. Only
+# smartdns-watch reads it, to take a username where an address would do.
+USER_NAMES = "/var/lib/smart-dns/users.json"
+
+
+def save_user_names(allowed):
+    """Keep who each allowed address belongs to. Returns whether it changed.
+
+    Readable by root alone: it ties usernames to home addresses.
+    """
+    rows = {a["ip"]: {"label": a.get("name", ""), "user": a.get("user", "")}
+            for a in allowed or [] if isinstance(a, dict) and a.get("ip")}
+    text = json.dumps(rows, ensure_ascii=False, sort_keys=True) + "\n"
+    try:
+        with open(USER_NAMES, encoding="utf-8") as fh:
+            if fh.read() == text:
+                return False
+    except OSError:
+        pass
+    os.makedirs(os.path.dirname(USER_NAMES), exist_ok=True)
+    tmp = USER_NAMES + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, USER_NAMES)
     return True
 
 
@@ -755,6 +784,10 @@ def sync_once():
         save_template_names(answer.get("templates"))
     except Exception as e:
         log(WARN, "template names not saved: %s" % e)
+    try:
+        save_user_names(answer.get("allowed"))
+    except Exception as e:
+        log(WARN, "user names not saved: %s" % e)
 
     names = {a["ip"]: a.get("name", "") for a in answer.get("allowed", [])}
     want = set(names)
@@ -872,7 +905,38 @@ details.pw[open]>summary::before{content:'be'}
 details.pw form{padding:0 16px 4px}
 details.pw .note{padding:0 16px 14px;margin-top:8px}
 .ok{color:#7dd3a0}.bad{color:#f85149}.warn{color:#e3b341}
+.shell{width:100%;max-width:440px}
+.brand{text-align:center;margin:0 0 18px;direction:ltr;line-height:1.15}
+.brand .mark{font-size:30px;vertical-align:middle;margin-right:8px}
+.brand .name{display:inline-block;vertical-align:middle;font-size:clamp(32px,10vw,42px);
+ font-weight:800;letter-spacing:1.5px;color:#7dd3a0;
+ background:linear-gradient(90deg,#7dd3a0,#58a6ff);-webkit-background-clip:text;
+ background-clip:text;-webkit-text-fill-color:transparent}
+footer{text-align:center;color:#6e7681;font-size:12px;padding:16px 0 0;direction:ltr}
+.manual input{direction:ltr;text-align:center;letter-spacing:.5px}
 """
+
+# Where the installer writes the version it installed. Read per page rather
+# than once, so it can never disagree with what is on disk.
+VERSION_FILE = "/var/lib/smart-dns/version"
+
+
+def app_version():
+    try:
+        with open(VERSION_FILE) as fh:
+            return fh.read().strip()[:20]
+    except OSError:
+        return ""
+
+
+def brand_html():
+    return ("<div class='brand'><span class='mark'>🩺</span>"
+            "<span class='name'>doctor dns</span></div>")
+
+
+def footer_html():
+    v = app_version()
+    return "<footer>doctor dns%s</footer>" % (" v" + html.escape(v) if v else "")
 
 
 def brand():
@@ -889,8 +953,32 @@ def user_page(inner):
     return ("""<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>%s</title><style>%s</style></head><body>
-<div class="card">%s</div></body></html>"""
-            % (html.escape(brand()), USER_CSS, inner))
+<div class="shell">%s<div class="card">%s</div>%s</div></body></html>"""
+            % (html.escape(brand()), USER_CSS, brand_html(), inner, footer_html()))
+
+
+# A Persian keyboard types these, and the address box should not care.
+DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩٫", "01234567890123456789.")
+
+
+def typed_ip(text):
+    """An address the customer typed by hand: (address, "") or ("", why).
+
+    The exit refuses one that belongs to another account, so what is left for
+    here is everything that could never be somebody's internet connection - a
+    private or reserved address, or one of this service's own two machines.
+    """
+    text = (text or "").translate(DIGITS).strip()
+    try:
+        addr = ipaddress.IPv4Address(text)
+    except ValueError:
+        return "", "این آی‌پی درست نیست — چهار عدد با نقطه، مثل 5.123.45.67"
+    if not addr.is_global or addr.is_multicast:
+        return "", ("این آی‌پی عمومی نیست. آی‌پی اینترنت خود را بنویسید، "
+                    "نه آی‌پی داخل شبکهٔ خانه (مثل 192.168...)")
+    if str(addr) in ((CFG or {}).get("SELF_IP"), (CFG or {}).get("PANEL_HOST")):
+        return "", "این آی‌پی مال سرورهای خود سرویس است"
+    return str(addr), ""
 
 
 def landing(banner=""):
@@ -965,8 +1053,29 @@ def register_ip_page(ip, banner=""):
             "شده‌اید — آن را ببندید، همین صفحه را تازه کنید و بعد ثبت کنید.</p>"
             "<p class='note'>آی‌پی خانگی معمولاً ثابت نیست. اگر مودم را ریست "
             "کردید و سرویس قطع شد، دوباره به همین صفحه بیایید و ثبت کنید.</p>"
-            "<p class='alt'><a href='/'>فعلاً نه، برو به حساب</a></p>"
-            % html.escape(ip))
+            % html.escape(ip)
+            + manual_ip_box() +
+            "<p class='alt'><a href='/'>فعلاً نه، برو به حساب</a></p>")
+
+
+def manual_ip_box(back=""):
+    """The box for typing an address by hand, here and on the account page.
+
+    Somebody on mobile data who wants the service at home would otherwise have
+    to go home before they could register it. `back` is where a refusal sends
+    them, so they land on the page they typed it on.
+    """
+    hidden = ("<input type='hidden' name='back' value='%s'>" % html.escape(back)
+              if back else "")
+    return ("<div class='dns manual'><div class='k'>ثبت دستی آی‌پی</div>"
+            "<p class='note' style='margin-top:0'>سرویس را برای اینترنت دیگری "
+            "می‌خواهید؟ مثلاً الان با موبایل آمده‌اید ولی سرویس را برای اینترنت "
+            "خانه لازم دارید. آی‌پی آن اینترنت را اینجا بنویسید؛ از صفحهٔ مودم "
+            "یا یک سایت «آی‌پی من چیست» روی همان اینترنت پیدایش می‌کنید.</p>"
+            "<form method='post' action='/register-ip'>%s"
+            "<input name='ip' required maxlength='40' inputmode='decimal' "
+            "placeholder='5.123.45.67' autocomplete='off' spellcheck='false'>"
+            "<button class='ghost'>ثبت این آی‌پی</button></form></div>" % hidden)
 
 
 def account_notice(info):
@@ -1277,9 +1386,20 @@ class UserPanel(http.server.BaseHTTPRequestHandler):
 
         if path != "/register-ip":
             return self.send_html("<h1>404</h1>", 404)
+        # Nothing typed is the button: the address this page is opened from.
+        form = self.form()
+        typed = (form.get("ip") or "").strip()
+        # One of two pages of our own, whatever the form claims.
+        back = "/" if form.get("back") == "/" else "/register-ip"
+        if typed:
+            ip, why = typed_ip(typed)
+            if not ip:
+                return self.redirect(back, why, bad=True)
+            log(INFO, "panel: %s registered %s by hand" % (self.client_ip(), ip))
+        else:
+            ip = self.client_ip()
         try:
-            res = post("/user-claim", {"session": self.session(),
-                                       "ip": self.client_ip()})
+            res = post("/user-claim", {"session": self.session(), "ip": ip})
         except Exception as e:
             log(ERROR, "panel: user-claim failed: %s" % e)
             res = {"ok": False, "message": "الان نشد"}
@@ -1361,6 +1481,7 @@ class UserPanel(http.server.BaseHTTPRequestHandler):
                 "ثبت دوباره همین آی‌پی</a>"
                 "<p class='note'>آی‌پی شما درست ثبت شده. اگر مودم را ریست کردید و "
                 "سرویس قطع شد، همین صفحه را باز کنید و این دکمه را بزنید.</p>")
+        body.append(manual_ip_box("/"))
         body.append(
             "<div class='dns'><div class='k'>ارسال رسید پرداخت</div>"
             "<p class='note' style='margin-top:0'>عکس فیش واریزی را بفرستید تا "

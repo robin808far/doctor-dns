@@ -104,9 +104,11 @@ print("on a relay")
 r, done, groups = machine("relay", profiles=("p1", "p2"))
 check("everything comes back and it says so",
       r.returncode == 0 and "all of it is back up" in r.stdout, r.stdout + r.stderr)
-check("it restarts the sync agent, both resolvers, dnsmasq, coturn and nginx",
+check("it restarts the sync agent, both resolvers, dnsmasq, coturn, the tunnel and nginx",
       sorted(done) == sorted(["smartdns-sync", "smartdns-dns@p1", "smartdns-dns@p2",
-                              "dnsmasq", "coturn", "nginx"]), str(done))
+                              "dnsmasq", "coturn", "smartdns-tunnel", "nginx"]), str(done))
+check("the tunnel before nginx, which falls back to the direct path meanwhile",
+      done.index("smartdns-tunnel") < done.index("nginx"), str(done))
 check("each resolver once, in the same call as the agent they belong to",
       ["smartdns-sync", "smartdns-dns@p1", "smartdns-dns@p2"] in groups, str(groups))
 check("nftables is never touched - it holds the allowlist",
@@ -129,9 +131,14 @@ check("a service that does not come back is named, and the command fails",
 
 print("on an exit")
 r, done, _ = machine("exit")
-check("it restarts both panels and nginx",
-      r.returncode == 0 and sorted(done) == ["nginx", "smartdns-admin", "smartdns-panel"],
+check("it restarts both panels, the tunnel and nginx",
+      r.returncode == 0 and sorted(done) == ["nginx", "smartdns-admin", "smartdns-panel",
+                                             "smartdns-tunnel"],
       str(done) + r.stdout + r.stderr)
+r, done, _ = machine("exit", FAKE_MISSING="smartdns-tunnel")
+check("a machine with no tunnel does not restart one",
+      r.returncode == 0 and "smartdns-tunnel" not in done and "smartdns-tunnel" not in r.stdout,
+      str(done) + r.stdout)
 check("with no connection warning - no customer's traffic is cut there",
       "drop for a moment" not in r.stdout)
 r, done, _ = machine("exit", FAKE_MISSING="smartdns-admin")

@@ -1,0 +1,61 @@
+#!/bin/bash
+# smartdns-api-guard - let only the relays reach this exit's sync API (8443).
+#
+# usage: smartdns-api-guard           load the rule
+#        smartdns-api-guard --print   show the rule, and load nothing
+#
+# The panel already refuses any address that is not one of its relays, but only
+# after the TLS handshake: a stranger still gets that far, and enough strangers
+# holding connections open can wear the API down. Dropped here, they never get
+# a connection at all.
+#
+# smartdns-panel.service runs this before every start, so the list is always
+# the RELAY_IP the panel itself reads: a relay added there by hand is let in
+# the next time the panel restarts, as it would be by the panel.
+set -u
+
+# Variables only so a test can point them somewhere else; nothing else sets them.
+ETC="${SMARTDNS_ETC:-/etc/smart-dns}"
+NFT="${SMARTDNS_NFT:-/usr/sbin/nft}"
+
+valid_ip() {
+    local IFS=. p
+    [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    for p in $1; do [ "$p" -le 255 ] || return 1; done
+}
+
+list="127.0.0.1"
+for ip in $(sed -n 's/^RELAY_IP=//p' "$ETC/panel.env" 2>/dev/null | head -1 | tr ',' ' '); do
+    if valid_ip "$ip"; then list="$list, $ip"
+    else echo "ignoring '$ip' in RELAY_IP - not an IPv4 address" >&2; fi
+done
+[ "$list" = "127.0.0.1" ] && echo "no relays in RELAY_IP - only this machine will reach 8443" >&2
+
+rules="table inet smartdns_api
+delete table inet smartdns_api
+table inet smartdns_api {
+    chain input {
+        type filter hook input priority -5 ; policy accept ;
+        tcp dport 8443 ip saddr { $list } accept
+        tcp dport 8443 drop
+    }
+}"
+
+case "${1:-}" in
+    --print) printf '%s\n' "$rules"; exit 0 ;;
+    -h|--help) sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    "") ;;
+    *) echo "unknown option: $1  (try -h)" >&2; exit 1 ;;
+esac
+
+[ -x "$NFT" ] || NFT="$(command -v nft || true)"
+if [ -z "$NFT" ]; then
+    echo "nft is not installed - the sync API stays open, and the panel refuses strangers itself" >&2
+    exit 0
+fi
+if printf '%s\n' "$rules" | "$NFT" -f -; then
+    echo "port 8443 answers: $list"
+else
+    echo "nft refused the rule - the sync API stays open, and the panel refuses strangers itself" >&2
+fi
+exit 0

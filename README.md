@@ -191,18 +191,53 @@ can see, but a firewall rule you wrote yourself it cannot.
 | **80** tcp | forwarded abroad; also how certificates are proved | the same |
 | **443** tcp | the SNI proxy | the same |
 | **3478** udp | STUN, so a console can work out its own NAT | — |
-| **8443** tcp | the customer panel — TLS only, so a relay without a certificate serves no panel at all | the sync API the relays connect to |
+| **8443** tcp | the customer panel — TLS only, so a relay without a certificate serves no panel at all | the sync API — it answers the relays and nobody else |
 | **8446** tcp | — | loopback only: the exit's route to Google over IPv6, where it has IPv6 |
+| **8444** tcp + udp | only with a tunnel: its port, answering the exit alone — a *reverse* tunnel listens here | the same, for a *direct* tunnel |
 | **22** tcp | ssh — never gated, so a wrong allowlist cannot lock you out | the same |
 
 The admin panel is the one port you choose. It defaults to **9443** and can be
-anything free; the installer stops you at 22, 53, 80, 443, 8443 and 8446, and
-`smartdns-access port` applies the same rule later, plus a check that nothing
-else is already listening.
+anything free; the installer stops you at 22, 53, 80, 443, 8443, 8446 and the
+tunnel's port, and `smartdns-access port` applies the same rule later, plus a
+check that nothing else is already listening.
 
 Inbound, the relay is the machine customers reach, so its DNS, proxy, STUN and
 panel ports have to be open to the internet. The exit only ever hears from the
 relay and from you, so 80, 443, 8443 and the panel port are enough there.
+
+### A tunnel between the relay and the exit (optional)
+
+By default the relay hands each connection to the exit as it is: plain TCP,
+the customer's TLS untouched inside. That is the fastest path, but the name of
+every site shows on the way, and on some routes filtering acts on exactly that
+— Google's names killed while everything else passes, or a whole provider
+slowed to a crawl.
+
+The installer can put a [BackPack](https://github.com/AminMGMT/BackPack) tunnel
+— Amin Mohammadi's work, see [Credits](#credits) — on that link instead. The exit asks when it is installed — plain TCP or
+BackPack, which transport, which end dials, which port — and the relay learns
+the answer from the pairing token, so the two ends cannot disagree. Customers
+notice nothing: DNS, the allowlist, usage, speed limits and both panels all sit
+in front of the tunnel.
+
+- The relay's nginx goes through the tunnel, and straight to the exit only
+  while the tunnel is down.
+- BackPack is fetched from its own releases when you ask for it and checked
+  against a hash pinned in the installer. It is not part of this project (it is
+  AGPL-3.0). A server with no internet: `BACKPACK_TARBALL=/path/to/the.tar.gz`.
+- The listening end's port answers the other machine and nobody else.
+- Back to plain TCP in one command, on either machine:
+  `sudo smartdns-tunnel off`. To change the transport, the port or which end
+  dials: `sudo bash doctor-dns.sh --tunnel` on the exit, then on the relay.
+  `smartdns-logs` shows its log and `smartdns-restart` restarts it.
+
+Which transport suits a route depends on the route, so try one or two:
+`--tunnel` makes changing it one line. **stealth** is encrypted and looks like
+random bytes, and is the default; **wss** and **wssmux** look like an ordinary
+HTTPS website; **tcp**, **ws** and their pooled forms are not encrypted, so the
+names of the sites still show. In our own test **quic** and **udp** did not
+connect at all. A *direct* tunnel, where the relay dials the exit, has four
+transports: stealth, wss, tcp and ws.
 
 ### Access control
 
@@ -285,6 +320,64 @@ smartdns-rules check gemini.google.com
                                  # disagree
 ```
 
+**`smartdns-watch`** — the names a customer's device asks for, live, and
+where this relay sent each. For finding what a service needs routed: have the
+customer open it until it fails, and watch.
+
+```sh
+sudo smartdns-watch ali          # one customer - by username, by the label
+                                 # smartdns-acl list shows (u12), or by address
+sudo smartdns-watch              # everybody, each line naming who asked
+```
+
+`via relay` is already routed. `direct` went around the relay: if the service
+refuses Iran, those are the names to add, with `smartdns add` or the panel's
+domains page. `filtered in Iran` is Iran's own block, which no routing gets
+past, and `no answer` usually means the address is not registered. Add only
+names a service uses over HTTPS or plain HTTP - a game's match servers talk on
+other ports, and routing them breaks the game. Nothing is kept: what it prints
+is all there is.
+
+#### Adding a game or an app
+
+A service that refuses Iran and is not in the list yet: the relay can show you
+what it needs.
+
+1. Register the address of the device you will test from, as usual, then on
+   the relay watch it by username:
+
+   ```sh
+   sudo smartdns-watch ali
+   ```
+
+2. Open the game or the app on that device until it shows its error.
+3. Read the names that go by. The `direct` ones went around the relay; the
+   service's own names among them - not ads or analytics - are the ones to
+   route. A name answered with an address that leads nowhere, like
+   `direct 0.0.0.1`, is the service refusing Iran in its DNS: route that one
+   too.
+4. Route them, from the panel's domains page (then tick them in the template
+   the customer is on), or on the relay:
+
+   ```sh
+   sudo smartdns add example.com
+   ```
+
+5. Open it again. Those names should now say `via relay`.
+
+If the service stops working once a name is added, that name is used on a port
+the relay does not carry - a game's match servers usually are. Take it back out:
+
+```sh
+sudo smartdns del example.com
+```
+
+What this cannot fix: names a service looks up itself without asking DNS -
+some mobile games do, and nothing shows in `smartdns-watch` for them - traffic
+that is neither HTTPS nor plain HTTP, and names that are `filtered in Iran`.
+When a set of names works, [open an issue](https://github.com/mehdi047/doctor-dns/issues)
+with them, so they can go in the default list.
+
 **`smartdns-acl`** — who may use the relay, and what they have used. The panel
 drives this rather than touching nftables itself, so there is one place where
 the rules about what is legal live.
@@ -351,6 +444,31 @@ back. If nginx's or dnsmasq's config does not load, that part is left running
 as it was rather than restarted into a failure, and the command says why.
 nftables is never restarted: that would throw away the allowlist and the usage
 counted since the last save.
+
+**`smartdns-tunnel`** — the tunnel between the relay and the exit, when there
+is one: see it, stop it, start it.
+
+```sh
+sudo smartdns-tunnel             # what it is, and whether it is carrying traffic
+sudo smartdns-tunnel off         # back to plain TCP, now
+sudo smartdns-tunnel on          # start it again, with the settings it had
+sudo bash doctor-dns.sh --tunnel # change it - on the exit first, then the relay
+```
+
+Either machine will do for `off`: the relay's nginx goes straight to the exit
+the moment its end of the tunnel stops answering, whichever machine stopped it.
+The choice is kept, so an upgrade does not bring the tunnel back. `--tunnel`
+asks the tunnel's questions again on a machine that is already set up: on the
+exit with what it has now as the answers enter gives, on the relay for the new
+pairing token the exit printed.
+
+**`smartdns-menu`** — every command on this page in one menu, for when you do
+not remember the one you want. Each choice shows the command before running it,
+so the next time you can type it yourself.
+
+```sh
+sudo smartdns-menu
+```
 
 ```sh
 smartdns-cert panel.example.com  # get or renew a certificate for that name
@@ -422,6 +540,16 @@ reach the service from.
 ## Contributors
 
 - [Armin Toranj](https://github.com/arminandtoo) — `@arminandtoo`
+
+## Credits
+
+- **[BackPack](https://github.com/AminMGMT/BackPack)**, by **Amin Mohammadi**
+  ([@AminMGMT](https://github.com/AminMGMT)), carries the optional tunnel
+  between the relay and the exit. It is his work, released under the AGPL-3.0:
+  this project only downloads his own unmodified releases, checks them against
+  a pinned hash, and runs them. Thank you, Amin.
+- The exit's nginx configuration started from
+  [rohammosalli/smart-dns](https://github.com/rohammosalli/smart-dns).
 
 ---
 

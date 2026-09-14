@@ -837,7 +837,8 @@ class Store:
         """
         rows = self.q(
             "SELECT i.ip AS ip, u.id AS uid, u.speed_kbps AS kbps,"
-            " COALESCE(u.template_id, ?) AS tid"
+            " COALESCE(u.template_id, ?) AS tid,"
+            " COALESCE(u.username, '') AS uname"
             " FROM ips i JOIN users u ON u.id = i.user_id"
             " WHERE u.status = 'active'", (default_id,))
         by_ip = {}
@@ -845,8 +846,10 @@ class Store:
         for r in rows:
             tid = r["tid"] if self.one(
                 "SELECT 1 FROM templates WHERE id = ?", (r["tid"],)) else default_id
+            # The username travels so smartdns-watch on a relay can take one
+            # where an address would do.
             by_ip[r["ip"]] = {"uid": r["uid"], "tid": tid,
-                              "kbps": r["kbps"] or 0}
+                              "kbps": r["kbps"] or 0, "user": r["uname"]}
             used.add(tid)
         custom = self.custom_domains()
         profiles = {}
@@ -1369,7 +1372,7 @@ class API(http.server.BaseHTTPRequestHandler):
             # it as the shaping mark, and parsing it back out of "u12" would
             # be a second place that has to agree about the format.
             allowed = [{"ip": ip, "name": "u%d" % v["uid"], "uid": v["uid"],
-                        "kbps": v["kbps"],
+                        "kbps": v["kbps"], "user": v.get("user", ""),
                         "profile": str(v["tid"]) if str(v["tid"]) in profiles else ""}
                        for ip, v in sorted(by_ip.items())]
             extra = [r["domain"] for r in self.store.q(

@@ -383,7 +383,36 @@ details.svc>summary label{flex:1}
 .pick button{padding:3px 10px;font-size:11px;font-weight:400;
  background:transparent;border:1px solid #30363d;color:#8b949e}
 .pick button:hover{background:#1c2029}
+.brand{text-align:center;margin:4px 0 26px;direction:ltr;line-height:1.15}
+.brand .mark{font-size:clamp(28px,6vw,38px);vertical-align:middle;margin-right:10px}
+.brand .name{display:inline-block;vertical-align:middle;font-size:clamp(34px,8vw,50px);
+ font-weight:800;letter-spacing:1.5px;color:#7dd3a0;
+ background:linear-gradient(90deg,#7dd3a0,#58a6ff);-webkit-background-clip:text;
+ background-clip:text;-webkit-text-fill-color:transparent}
+footer{text-align:center;color:#6e7681;font-size:12px;padding:26px 0 6px;direction:ltr}
 """
+
+# Where the installer writes the version it installed. Read per page rather
+# than once, so it can never disagree with what is on disk.
+VERSION_FILE = "/var/lib/smart-dns/version"
+
+
+def app_version():
+    try:
+        with open(VERSION_FILE) as fh:
+            return fh.read().strip()[:20]
+    except OSError:
+        return ""
+
+
+def brand_html():
+    return ("<div class='brand'><span class='mark'>🩺</span>"
+            "<span class='name'>doctor dns</span></div>")
+
+
+def footer_html():
+    v = app_version()
+    return "<footer>doctor dns%s</footer>" % (" v" + html.escape(v) if v else "")
 
 
 def page(title, body, cfg, active="", msg=None, msg_kind="good"):
@@ -399,10 +428,11 @@ def page(title, body, cfg, active="", msg=None, msg_kind="good"):
     return ("""<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="icon" href="data:,">
-<title>%s</title><style>%s</style></head><body><div class="wrap">
+<title>%s</title><style>%s</style></head><body><div class="wrap">%s
 <header><h1>%s</h1><nav>%s<a href='/%s/logout'>خروج</a></nav></header>
-%s%s</div></body></html>""" % (html.escape(title), CSS, html.escape(title), nav,
-                               cfg["ADMIN_PATH"], banner, body))
+%s%s%s</div></body></html>""" % (html.escape(title), CSS, brand_html(),
+                                 html.escape(title), nav, cfg["ADMIN_PATH"],
+                                 banner, body, footer_html()))
 
 
 def login_page(cfg, error=None):
@@ -413,12 +443,14 @@ def login_page(cfg, error=None):
     return """<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="icon" href="data:,">
-<title>ورود</title><style>%s</style></head><body><div class="wrap"><div class="login">
+<title>ورود</title><style>%s</style></head><body><div class="wrap">%s
+<div class="login" style="margin-top:6vh">
 <div class="card"><h2>پنل مدیریت</h2>%s
 <form method="post" action="/%s/"><div class="f"><label>رمز عبور</label>
 <input type="password" name="password" autofocus style="width:100%%"></div>
 <button type="submit" style="width:100%%">ورود</button></form></div>
-</div></div></body></html>""" % (CSS, err, cfg["ADMIN_PATH"])
+</div>%s</div></body></html>""" % (CSS, brand_html(), err, cfg["ADMIN_PATH"],
+                                   footer_html())
 
 
 def bar(used, total):

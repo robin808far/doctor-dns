@@ -38,7 +38,7 @@ STAMP="$(date +%Y%m%d-%H%M%S)"
 # What this file is. Written to the machine once an install finishes, so the
 # next run can tell whether it is an upgrade, a re-run, or somebody about to
 # put an older version over a newer one by accident.
-VERSION="0.3.12"
+VERSION="0.5.0"
 
 # What this install did, so uninstall can undo exactly that and nothing more.
 # Without it, removal would be guesswork: whether dnsmasq was ours or already
@@ -101,6 +101,9 @@ install_payload() {
               -e "s#__EXIT_IP__#${EXIT_IP}#g" \
               -e "s#__MODULE_PATH__#${MOD:-__MODULE_PATH__}#g" \
               -e "${NO_GOOGLE_V6:+/# google-v6 begin/,/# google-v6 end/d}" \
+              -e "s#__EXIT_HTTPS__#${EXIT_HTTPS:-__EXIT_HTTPS__}#g" \
+              -e "s#__EXIT_HTTP__#${EXIT_HTTP:-__EXIT_HTTP__}#g" \
+              -e "${NO_TUNNEL:+/# tunnel begin/,/# tunnel end/d}" \
         > "$tmp"
     [ -s "$tmp" ] || die "payload $name is empty - is this file complete?"
     # Whether this file was ours or already here decides what uninstall does
@@ -167,6 +170,283 @@ enable_service() {
     return 0
 }
 
+# ------------------------------------------------------------------ tunnel
+# An optional tunnel between the relay and the exit, carried by BackPack - the
+# work of Amin Mohammadi (github.com/AminMGMT/BackPack, AGPL-3.0). Its binary is
+# fetched from his own releases when asked for and checked against the hashes
+# pinned here - never copied into this project, and never a version nobody here
+# has tried.
+BACKPACK_VERSION="v1.8.0"
+BACKPACK_SHA_amd64="0fca707e413c0ca051fac1bf47a8f5bc870bc54a67866415b75fd93fbd91f9b8"
+BACKPACK_SHA_arm64="b93d4b1c76d44e2168a66f7e3e27173b07682d012b3cdf3917f768ea7064a764"
+BACKPACK_BIN=/usr/local/lib/smart-dns/backpack
+TUNNEL_DIR=/etc/smart-dns/tunnel
+TUNNEL_NFT=/etc/nftables.d/40-smartdns-tunnel.conf
+# The tunnel's end on the relay, on loopback only: nginx points here, and
+# nothing outside the machine can reach either port.
+TUNNEL_LOCAL_HTTPS=18443
+TUNNEL_LOCAL_HTTP=18080
+# Which transports each direction has. A direct tunnel has four; BackPack's
+# spoofing carrier is a different kind of tunnel and is not offered.
+TUNNEL_REVERSE_TRANSPORTS="stealth wss wssmux tcp tcpmux kcp pck quic ws wsmux xdi udp"
+TUNNEL_DIRECT_TRANSPORTS="stealth wss tcp ws"
+
+tunnel_transport_ok() {
+    local list="$TUNNEL_REVERSE_TRANSPORTS"
+    [ "$1" = direct ] && list="$TUNNEL_DIRECT_TRANSPORTS"
+    case " $list " in *" $2 "*) return 0 ;; esac
+    return 1
+}
+
+# Why a port cannot carry the tunnel, or nothing when it can. The same ports
+# the admin panel may not take, and the relay's own besides.
+tunnel_port_problem() {
+    local p="$1" admin
+    case "$p" in *[!0-9]*|"") echo "not a number"; return 0 ;; esac
+    { [ "$p" -ge 1 ] && [ "$p" -le 65535 ]; } || { echo "not a port"; return 0; }
+    case "$p" in
+        22) echo "ssh" ;;
+        53) echo "dns" ;;
+        80|443) echo "the proxy" ;;
+        8443) echo "the sync API and the customer panel" ;;
+        8446) echo "the exit's route to Google over IPv6" ;;
+        8402) echo "where certificates are proved" ;;
+        3478) echo "STUN on the relay" ;;
+        "$TUNNEL_LOCAL_HTTPS"|"$TUNNEL_LOCAL_HTTP") echo "the tunnel's own end on the relay" ;;
+    esac
+    { [ "$p" -ge 5300 ] && [ "$p" -le 5399 ]; } && echo "the templates' resolvers on the relay"
+    admin="$(sed -n 's/^ADMIN_PORT=//p' /etc/smart-dns/admin.env 2>/dev/null | head -1 || true)"
+    [ -n "$admin" ] && [ "$p" = "$admin" ] && echo "the admin panel"
+    return 0
+}
+
+# bp-stealth-8444-r: what the exit chose, carried to the relay inside the
+# pairing token so the two ends are never set up differently.
+parse_tunnel_spec() {
+    local s="$1" d
+    case "$s" in bp-*-*-[rd]) ;; *) return 1 ;; esac
+    s="${s#bp-}"; d="${s##*-}"; s="${s%-*}"
+    TUNNEL_PORT="${s##*-}"; TUNNEL_TRANSPORT="${s%-*}"
+    if [ "$d" = r ]; then TUNNEL_DIRECTION=reverse; else TUNNEL_DIRECTION=direct; fi
+    tunnel_transport_ok "$TUNNEL_DIRECTION" "$TUNNEL_TRANSPORT" || return 1
+    [ -z "$(tunnel_port_problem "$TUNNEL_PORT")" ] || return 1
+    TUNNEL=backpack
+}
+
+# Both ends derive the tunnel's token from the secret they already share, so
+# there is nothing new to copy between them.
+tunnel_token() { printf 'doctor-dns-tunnel:%s' "$1" | sha256sum | cut -c1-48; }
+
+ask_tunnel() {
+    local a list="" i=0 t note
+    # What this machine has now, when there is one, is the answer enter gives:
+    # asking again with --tunnel and changing only the port should take one
+    # line typed, not four.
+    local d1=1 d2=1 d3=1
+    [ "${CUR_TUNNEL:-}" = backpack ] && d1=2
+    [ "${CUR_DIRECTION:-}" = direct ] && d2=2
+    printf '\n%sBetween the relay and this exit%s\n\n' "$B" "$N"
+    if [ "${CUR_TUNNEL:-}" = backpack ]; then
+        printf '  now: BackPack, %s, %s, port %s\n\n' "${CUR_TRANSPORT:-?}" "${CUR_DIRECTION:-?}" "${CUR_PORT:-?}"
+    elif [ -n "${CUR_TUNNEL:-}" ]; then
+        printf '  now: direct TCP\n\n'
+    fi
+    printf '  1) direct TCP        as it has always been - nothing extra installed\n'
+    printf '  2) BackPack tunnel   hides the names of the sites from filtering on the way\n\n'
+    read -r -p "  choice [$d1]: " a
+    case "${a:-$d1}" in 1) TUNNEL=off; return 0 ;; 2) TUNNEL=backpack ;; *) die "answer 1 or 2" ;; esac
+    printf '\n  Which end dials the other?\n\n'
+    printf '  1) reverse   this exit dials the relay - BackPack'"'"'s usual way\n'
+    printf '  2) direct    the relay dials this exit - for where connections into Iran do not\n'
+    printf '               get through\n\n'
+    read -r -p "  choice [$d2]: " a
+    case "${a:-$d2}" in 1) TUNNEL_DIRECTION=reverse ;; 2) TUNNEL_DIRECTION=direct ;; *) die "answer 1 or 2" ;; esac
+    # What each transport is. How one performs depends on the route, so that is
+    # not said here; only the two that did not connect at all in our own test
+    # say so.
+    printf '\n  Transport:\n\n'
+    while IFS='|' read -r t note; do
+        tunnel_transport_ok "$TUNNEL_DIRECTION" "$t" || continue
+        i=$((i + 1)); list="$list $t"
+        [ "$t" = "${CUR_TRANSPORT:-}" ] && d3=$i
+        printf '  %2d) %-8s %s\n' "$i" "$t" "$note"
+    done <<'NOTES'
+stealth|encrypted, looks like random bytes - recommended
+wss|looks like an ordinary HTTPS website
+wssmux|the same over a few pooled connections
+wsmux|websocket, pooled - not encrypted: site names show
+ws|websocket - not encrypted: site names show
+tcp|plain - not encrypted: site names show
+tcpmux|plain and pooled - not encrypted: site names show
+kcp|over UDP, for a route that loses packets
+pck|for a route where TCP connects, then dies
+xdi|inside ping - for where only ping gets through
+quic|over UDP - did not connect in our test
+udp|raw datagrams, no reliability - did not connect in our test
+NOTES
+    printf '\n'
+    read -r -p "  choice [$d3]: " a
+    a="${a:-$d3}"
+    case "$a" in *[!0-9]*) die "answer with the number" ;; esac
+    # shellcheck disable=SC2086
+    TUNNEL_TRANSPORT="$(echo $list | cut -d' ' -f"$a")"
+    [ -n "$TUNNEL_TRANSPORT" ] || die "there is no transport number $a"
+    while :; do
+        read -r -p "  tunnel port [${CUR_PORT:-8444}]: " a
+        a="${a:-${CUR_PORT:-8444}}"
+        t="$(tunnel_port_problem "$a")"
+        [ -z "$t" ] && { TUNNEL_PORT="$a"; break; }
+        warn "port $a cannot carry the tunnel: $t - pick another"
+    done
+    if [ "$TUNNEL_DIRECTION" = reverse ]; then
+        info "open port $TUNNEL_PORT to this exit in the relay's firewall, if it has one"
+    else
+        info "open port $TUNNEL_PORT to the relay in this exit's firewall, if it has one"
+    fi
+}
+
+# Fetch the pinned BackPack, or take it from BACKPACK_TARBALL. Refuses anything
+# whose hash does not match. Returns non-zero, having said why, on failure.
+install_backpack() {
+    local arch sha tmp
+    case "$(uname -m)" in
+        x86_64|amd64) arch=amd64 ;;
+        aarch64|arm64) arch=arm64 ;;
+        *) warn "BackPack has no build for $(uname -m) in this installer"; return 1 ;;
+    esac
+    eval "sha=\$BACKPACK_SHA_$arch"
+    if [ -x "$BACKPACK_BIN" ] && [ "$(cat "$BACKPACK_BIN.version" 2>/dev/null)" = "$BACKPACK_VERSION $sha" ]; then
+        info "BackPack $BACKPACK_VERSION already here"
+        return 0
+    fi
+    tmp="$(mktemp -d)"
+    if [ -n "${BACKPACK_TARBALL:-}" ]; then
+        cp "$BACKPACK_TARBALL" "$tmp/bp.tgz" || { warn "cannot read $BACKPACK_TARBALL"; rm -rf "$tmp"; return 1; }
+    elif ! curl -fsSL -m 300 -o "$tmp/bp.tgz" \
+            "https://github.com/AminMGMT/BackPack/releases/download/$BACKPACK_VERSION/backpack_linux_$arch.tar.gz"; then
+        warn "could not download BackPack from GitHub. Without internet, fetch"
+        warn "backpack_linux_$arch.tar.gz ($BACKPACK_VERSION) elsewhere and run with"
+        warn "    BACKPACK_TARBALL=/path/to/it"
+        rm -rf "$tmp"; return 1
+    fi
+    if [ "$(sha256sum "$tmp/bp.tgz" | cut -d' ' -f1)" != "$sha" ]; then
+        warn "that BackPack archive does not match the hash pinned for $BACKPACK_VERSION - not installing it"
+        rm -rf "$tmp"; return 1
+    fi
+    tar -xzf "$tmp/bp.tgz" -C "$tmp" 2>/dev/null
+    [ -f "$tmp/backpack" ] || { warn "no backpack binary in that archive"; rm -rf "$tmp"; return 1; }
+    mkdir -p "$(dirname "$BACKPACK_BIN")"
+    note_file "$BACKPACK_BIN"
+    note_file "$BACKPACK_BIN.version"
+    install -m 755 "$tmp/backpack" "$BACKPACK_BIN"
+    printf '%s %s\n' "$BACKPACK_VERSION" "$sha" > "$BACKPACK_BIN.version"
+    rm -rf "$tmp"
+    info "BackPack $BACKPACK_VERSION installed, its hash checked"
+    info "BackPack is the work of Amin Mohammadi - github.com/AminMGMT/BackPack (AGPL-3.0)"
+}
+
+# The tunnel's config for this end, on stdout.
+tunnel_toml() {
+    local token c="" k=""
+    token="$(tunnel_token "$1")"
+    # wss on the listening end wants a certificate: the machine's own if it has
+    # a domain, a self-signed one if not. The other end does not verify it -
+    # BackPack proves the token inside the TLS session instead.
+    case "$TUNNEL_TRANSPORT" in wss|wssmux)
+        if [ -n "${PANEL_DOMAIN:-}" ] && [ -f "/etc/letsencrypt/live/$PANEL_DOMAIN/fullchain.pem" ]; then
+            c="/etc/letsencrypt/live/$PANEL_DOMAIN/fullchain.pem"; k="/etc/letsencrypt/live/$PANEL_DOMAIN/privkey.pem"
+        else
+            c="$TUNNEL_DIR/tls.crt"; k="$TUNNEL_DIR/tls.key"
+            [ -f "$c" ] || openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+                -subj "/CN=${PANEL_DOMAIN:-localhost}" -keyout "$k" -out "$c" >/dev/null 2>&1 || true
+        fi ;;
+    esac
+    printf '# written by the doctor dns installer - re-run it to change the tunnel\n'
+    if [ "$TUNNEL_DIRECTION" = reverse ] && [ "$ROLE" = relay ]; then
+        printf '[server]\nbind_addr = "0.0.0.0:%s"\n' "$TUNNEL_PORT"
+        printf 'ports = ["127.0.0.1:%s=443", "127.0.0.1:%s=80"]\n' "$TUNNEL_LOCAL_HTTPS" "$TUNNEL_LOCAL_HTTP"
+        [ -n "$c" ] && printf 'tls_cert = "%s"\ntls_key = "%s"\n' "$c" "$k"
+    elif [ "$TUNNEL_DIRECTION" = reverse ]; then
+        printf '[client]\nremote_addr = "%s:%s"\n' "$RELAY_IP" "$TUNNEL_PORT"
+    elif [ "$ROLE" = relay ]; then
+        printf '[direct]\nrole = "iran"\naddr = "%s:%s"\n' "$EXIT_IP" "$TUNNEL_PORT"
+        printf 'ports = ["127.0.0.1:%s=443", "127.0.0.1:%s=80"]\n' "$TUNNEL_LOCAL_HTTPS" "$TUNNEL_LOCAL_HTTP"
+    else
+        printf '[direct]\nrole = "kharej"\naddr = "0.0.0.0:%s"\n' "$TUNNEL_PORT"
+        [ -n "$c" ] && printf 'tls_cert = "%s"\ntls_key = "%s"\n' "$c" "$k"
+    fi
+    printf 'transport = "%s"\ntoken = "%s"\n' "$TUNNEL_TRANSPORT" "$token"
+    # The reverse engine's own extras: no web panel, no kernel tuning of its
+    # own, and a log at the level journald is read at.
+    if [ "$TUNNEL_DIRECTION" = reverse ]; then
+        printf 'web_port = 0\nskip_optz = true\nlog_level = "info"\n'
+    fi
+}
+
+# Bring this end of the tunnel to what TUNNEL says, or take it down.
+apply_tunnel() {
+    local secret="$1" tmp changed=0 peer
+    if [ "${TUNNEL:-off}" != backpack ]; then
+        if [ -f /etc/systemd/system/smartdns-tunnel.service ]; then
+            systemctl disable --now smartdns-tunnel.service >/dev/null 2>&1 || true
+            info "no tunnel - the relay reaches the exit directly"
+        fi
+        # The whole directory: BackPack keeps its metrics beside the config.
+        rm -f "$TUNNEL_NFT"
+        rm -rf "$TUNNEL_DIR"
+        nft delete table inet smartdns_tunnel >/dev/null 2>&1 || true
+        return 0
+    fi
+    step "Tunnel: BackPack $BACKPACK_VERSION - $TUNNEL_TRANSPORT, $TUNNEL_DIRECTION, port $TUNNEL_PORT"
+    if [ -z "$secret" ]; then
+        warn "no pairing, so no tunnel - the relay reaches the exit directly"
+        TUNNEL=off; return 0
+    fi
+    mkdir -p "$TUNNEL_DIR"; chmod 700 "$TUNNEL_DIR"
+    note_file "$TUNNEL_DIR/tunnel.toml"
+    tmp="$(mktemp)"
+    tunnel_toml "$secret" > "$tmp"
+    cmp -s "$tmp" "$TUNNEL_DIR/tunnel.toml" || changed=1
+    install -m 600 "$tmp" "$TUNNEL_DIR/tunnel.toml"; rm -f "$tmp"
+    # The end that listens lets the other machine in and nobody else. Loaded
+    # by the service itself as well, so it holds on a machine whose nftables
+    # service does not read /etc/nftables.d.
+    if { [ "$ROLE" = relay ] && [ "$TUNNEL_DIRECTION" = reverse ]; } \
+       || { [ "$ROLE" = exit ] && [ "$TUNNEL_DIRECTION" = direct ]; }; then
+        if [ "$ROLE" = relay ]; then peer="$EXIT_IP"; else peer="$RELAY_IP"; fi
+        mkdir -p /etc/nftables.d
+        note_file "$TUNNEL_NFT"
+        cat > "$TUNNEL_NFT" <<EOF
+# written by the doctor dns installer: the tunnel's port answers $peer only
+table inet smartdns_tunnel
+delete table inet smartdns_tunnel
+table inet smartdns_tunnel {
+    chain input {
+        type filter hook input priority -5 ; policy accept ;
+        tcp dport $TUNNEL_PORT ip saddr != $peer drop
+        udp dport $TUNNEL_PORT ip saddr != $peer drop
+        meta nfproto ipv6 tcp dport $TUNNEL_PORT drop
+        meta nfproto ipv6 udp dport $TUNNEL_PORT drop
+    }
+}
+EOF
+        if nft -f "$TUNNEL_NFT" 2>/dev/null; then info "port $TUNNEL_PORT answers $peer only"
+        else warn "could not load the tunnel's firewall rule - port $TUNNEL_PORT is open to all"; fi
+    else
+        rm -f "$TUNNEL_NFT"
+        nft delete table inet smartdns_tunnel >/dev/null 2>&1 || true
+    fi
+    install_payload TUNNEL_SERVICE /etc/systemd/system/smartdns-tunnel.service && changed=1 || true
+    systemctl daemon-reload
+    enable_service smartdns-tunnel.service
+    if [ "$changed" = 1 ] || ! systemctl is-active --quiet smartdns-tunnel.service; then
+        systemctl restart smartdns-tunnel.service
+    fi
+    sleep 2
+    if systemctl is-active --quiet smartdns-tunnel.service; then info "tunnel service running"
+    else warn "the tunnel service did not start - journalctl -u smartdns-tunnel"; fi
+}
+
 # Classify a file we are about to write. "replaced" means something was already
 # there and uninstall should put it back; "created" means it is ours to delete.
 # A re-run must not reclassify: once a file has been recorded as replaced, the
@@ -200,13 +480,17 @@ case "${1:-}" in
     --version|-V) printf '%s\n' "$VERSION"; exit 0 ;;
     --help|-h)
         printf 'doctor dns %s\n\n' "$VERSION"
-        printf 'usage: sudo bash %s [--uninstall]\n\n' "$0"
+        printf 'usage: sudo bash %s [--uninstall | --tunnel]\n\n' "$0"
         printf '  no arguments   install or update this machine\n'
         printf '  --uninstall    put it back as it was\n'
+        printf '  --tunnel       choose the tunnel between relay and exit again, then update\n'
         printf '  --version      print the version of this file\n'
         printf '\nenvironment (sudo does not pass these, put them after it):\n'
         printf '  ASSUME_YES=1   take the default for every question\n'
         printf '  ENFORCE=no     leave a relay open to everyone\n'
+        printf '  TUNNEL=backpack|off  TUNNEL_TRANSPORT=stealth  TUNNEL_DIRECTION=reverse|direct\n'
+        printf '  TUNNEL_PORT=8444     the tunnel between relay and exit, asked on the exit\n'
+        printf '  BACKPACK_TARBALL=/path/backpack_linux_amd64.tar.gz   BackPack without GitHub\n'
         exit 0 ;;
 esac
 
@@ -301,6 +585,12 @@ uninstall() {
     if nft list table inet smartdns >/dev/null 2>&1; then
         nft delete table inet smartdns; info "removed the nftables table"
     fi
+    if nft list table inet smartdns_tunnel >/dev/null 2>&1; then
+        nft delete table inet smartdns_tunnel; info "removed the tunnel's firewall table"
+    fi
+    if nft list table inet smartdns_api >/dev/null 2>&1; then
+        nft delete table inet smartdns_api; info "removed the sync API's firewall table"
+    fi
     # 10- is recorded in the state file and goes with the other created files.
     # 20- and 30- are not: smartdns-acl writes them at runtime, long after the
     # install, so nothing recorded them. The allowlist in 20- is worth keeping,
@@ -368,6 +658,9 @@ uninstall() {
 # --version and --help were answered above, before the preflight.
 case "${1:-}" in
     --uninstall|-u|uninstall) uninstall ;;
+    # Asked on the exit, carried to the relay by the pairing token - see the
+    # tunnel section below.
+    --tunnel|tunnel) ASK_TUNNEL=1 ;;
     "") ;;
     *) die "unknown argument: $1  (try --help)" ;;
 esac
@@ -569,8 +862,88 @@ if [ -z "${PANEL_DOMAIN:-}" ] && [ -z "${ASSUME_YES:-}" ] && [ -z "$UPGRADE" ]; 
     fi
 fi
 
+# ------------------------------------------------------------------ tunnel
+# How the relay reaches the exit: straight, as it always has, or through a
+# BackPack tunnel that hides the names of the sites from filtering on the way.
+# The exit is asked, because it is installed first; the relay learns the
+# answer from the pairing token, so the two ends cannot disagree. A re-run
+# keeps whatever this machine was set up with.
+TUNNEL="${TUNNEL:-}"
+TUNNEL_SPEC=""
+TUNNEL_OUT=""
+env_get() { sed -n "s/^$2=//p" "$1" 2>/dev/null | head -1 || true; }
+# --tunnel: ask again on a machine that is already set up. The exit shows the
+# menu with what it has now as the defaults; the relay asks for the exit's new
+# pairing token, which carries the answer.
+if [ -n "${ASK_TUNNEL:-}" ] && [ -z "$TUNNEL" ]; then
+    if [ "$ROLE" = exit ]; then
+        CUR_TUNNEL="$(env_get /etc/smart-dns/panel.env TUNNEL)"
+        CUR_TRANSPORT="$(env_get /etc/smart-dns/panel.env TUNNEL_TRANSPORT)"
+        CUR_DIRECTION="$(env_get /etc/smart-dns/panel.env TUNNEL_DIRECTION)"
+        CUR_PORT="$(env_get /etc/smart-dns/panel.env TUNNEL_PORT)"
+        ask_tunnel
+    elif [ -z "${SYNC_TOKEN:-}" ]; then
+        printf '\n%sTunnel%s\n\n' "$B" "$N"
+        printf '  Run the installer with --tunnel on the exit first. It prints a new\n'
+        printf '  pairing token that carries its answer: paste it here, or press enter\n'
+        printf '  to keep the tunnel this relay has now.\n\n'
+        read -r -p "  pairing token: " SYNC_TOKEN
+    fi
+fi
+if [ -z "$TUNNEL" ]; then
+    if [ "$ROLE" = exit ] && [ -n "$(env_get /etc/smart-dns/panel.env TUNNEL)" ]; then
+        TUNNEL="$(env_get /etc/smart-dns/panel.env TUNNEL)"
+        TUNNEL_TRANSPORT="${TUNNEL_TRANSPORT:-$(env_get /etc/smart-dns/panel.env TUNNEL_TRANSPORT)}"
+        TUNNEL_DIRECTION="${TUNNEL_DIRECTION:-$(env_get /etc/smart-dns/panel.env TUNNEL_DIRECTION)}"
+        TUNNEL_PORT="${TUNNEL_PORT:-$(env_get /etc/smart-dns/panel.env TUNNEL_PORT)}"
+    elif [ "$ROLE" = relay ]; then
+        spec="$(printf '%s' "${SYNC_TOKEN:-}" | cut -s -d. -f3)"
+        if [ -n "$spec" ]; then
+            parse_tunnel_spec "$spec" || die "the tunnel part of the pairing token, '$spec', is not one this installer knows.
+    Install the exit and the relay from the same version of this file."
+        elif [ -n "${SYNC_TOKEN:-}" ]; then
+            TUNNEL=off          # a two-part token: the exit has no tunnel
+        elif [ -n "$(env_get /etc/smart-dns/sync.env TUNNEL)" ]; then
+            TUNNEL="$(env_get /etc/smart-dns/sync.env TUNNEL)"
+            TUNNEL_TRANSPORT="${TUNNEL_TRANSPORT:-$(env_get /etc/smart-dns/sync.env TUNNEL_TRANSPORT)}"
+            TUNNEL_DIRECTION="${TUNNEL_DIRECTION:-$(env_get /etc/smart-dns/sync.env TUNNEL_DIRECTION)}"
+            TUNNEL_PORT="${TUNNEL_PORT:-$(env_get /etc/smart-dns/sync.env TUNNEL_PORT)}"
+        fi
+    fi
+fi
+if [ "$ROLE" = exit ] && [ -z "$TUNNEL" ] && [ -z "${ASSUME_YES:-}" ] && [ -z "$UPGRADE" ]; then
+    ask_tunnel
+fi
+case "${TUNNEL:-off}" in
+    off|no|direct|"") TUNNEL=off ;;
+    backpack|on|yes) TUNNEL=backpack ;;
+    *) die "TUNNEL must be backpack or off" ;;
+esac
+if [ "$TUNNEL" = backpack ]; then
+    TUNNEL_DIRECTION="${TUNNEL_DIRECTION:-reverse}"
+    TUNNEL_TRANSPORT="${TUNNEL_TRANSPORT:-stealth}"
+    TUNNEL_PORT="${TUNNEL_PORT:-8444}"
+    case "$TUNNEL_DIRECTION" in reverse|direct) ;; *) die "TUNNEL_DIRECTION must be reverse or direct" ;; esac
+    tunnel_transport_ok "$TUNNEL_DIRECTION" "$TUNNEL_TRANSPORT" \
+        || die "BackPack's $TUNNEL_DIRECTION tunnel has no transport called '$TUNNEL_TRANSPORT'"
+    why="$(tunnel_port_problem "$TUNNEL_PORT")"
+    [ -z "$why" ] || die "port $TUNNEL_PORT cannot carry the tunnel: $why"
+    # The tunnel runs between this relay and its own exit, on a secret only
+    # that exit knows - a relay whose panel is on another machine has none.
+    if [ "$ROLE" = relay ] && [ -n "${PANEL_IP:-}" ] && [ "$PANEL_IP" != "$EXIT_IP" ]; then
+        warn "the panel is on $PANEL_IP, not on this relay's exit - no tunnel"
+        TUNNEL=off
+    fi
+fi
+[ "$TUNNEL" = backpack ] && TUNNEL_SPEC="bp-$TUNNEL_TRANSPORT-$TUNNEL_PORT-$(printf '%.1s' "$TUNNEL_DIRECTION")"
+if [ "$TUNNEL" = backpack ]; then
+    TUNNEL_OUT="BackPack, $TUNNEL_TRANSPORT, $TUNNEL_DIRECTION, port $TUNNEL_PORT"
+else
+    TUNNEL_OUT="none - the relay reaches the exit directly"
+fi
+
 printf '\n%sAbout to configure:%s\n' "$B" "$N"
-printf '    role   : %s\n    relay  : %s\n    exit   : %s\n\n' "$ROLE" "$RELAY_IP" "$EXIT_IP"
+printf '    role   : %s\n    relay  : %s\n    exit   : %s\n    tunnel : %s\n\n' "$ROLE" "$RELAY_IP" "$EXIT_IP" "$TUNNEL_OUT"
 if [ -z "${ASSUME_YES:-}" ] && [ -z "$UPGRADE" ]; then
     read -r -p "  proceed? [y/N]: " ok
     case "$ok" in y|Y|yes) ;; *) die "cancelled" ;; esac
@@ -615,7 +988,8 @@ step "Installing packages"
 if [ "$ROLE" = relay ]; then
     WANT="nginx libnginx-mod-stream dnsmasq coturn nftables dnsutils python3 curl"
 else
-    WANT="nginx libnginx-mod-stream dnsutils curl python3 openssl"
+    # nftables for the rule that keeps strangers off the sync API.
+    WANT="nginx libnginx-mod-stream dnsutils curl python3 openssl nftables"
 fi
 # Note what was missing beforehand, so uninstall can name exactly what this
 # script added rather than offering to purge nginx from a web server.
@@ -767,6 +1141,18 @@ if [ "$ROLE" = exit ]; then
         info "no working IPv6 here, or nginx older than 1.23.1 - Google leaves over IPv4"
     fi
 fi
+# The tunnel's binary comes before nginx, so that a download that fails
+# leaves this run on the direct path rather than with nginx pointed at a
+# tunnel that will never be there.
+if [ "$TUNNEL" = backpack ] && ! install_backpack; then
+    warn "no tunnel this run - the relay reaches the exit directly"
+    TUNNEL=off; TUNNEL_SPEC=""; TUNNEL_OUT="none - BackPack could not be installed"
+fi
+if [ "$ROLE" = relay ] && [ "$TUNNEL" = backpack ]; then
+    NO_TUNNEL=""; EXIT_HTTPS=to_exit_https; EXIT_HTTP=to_exit_http
+else
+    NO_TUNNEL=1; EXIT_HTTPS="$EXIT_IP:443"; EXIT_HTTP="$EXIT_IP:80"
+fi
 if [ "$ROLE" = relay ]; then
     install_payload RELAY_NGINX /etc/nginx/nginx.conf && NGINX_CHANGED=1 || true
 else
@@ -892,6 +1278,12 @@ if [ "$ROLE" = relay ]; then
     chmod +x /usr/local/bin/smartdns-rules
     info "try: smartdns-rules check gemini.google.com"
 
+    step "smartdns-watch command, for the names a customer asks for"
+    note_file /usr/local/bin/smartdns-watch
+    payload SMARTDNS_WATCH > /usr/local/bin/smartdns-watch
+    chmod +x /usr/local/bin/smartdns-watch
+    info "try: smartdns-watch <username or address>"
+
     step "epic-pin, keeping Epic's backend on addresses that answer from here"
     # epic-pins.conf is written later by epic-pin itself, but it is ours either
     # way and uninstall needs to know to take it with us.
@@ -954,6 +1346,14 @@ note_file /usr/local/bin/smartdns-logs
 payload SMARTDNS_RESTART > /usr/local/bin/smartdns-restart
 chmod +x /usr/local/bin/smartdns-restart
 note_file /usr/local/bin/smartdns-restart
+# On either side, tunnel or none: status says there is none, which is itself
+# the answer somebody asking wants.
+payload SMARTDNS_TUNNEL > /usr/local/bin/smartdns-tunnel
+chmod +x /usr/local/bin/smartdns-tunnel
+note_file /usr/local/bin/smartdns-tunnel
+payload SMARTDNS_MENU > /usr/local/bin/smartdns-menu
+chmod +x /usr/local/bin/smartdns-menu
+note_file /usr/local/bin/smartdns-menu
 install_payload CERT_SERVICE /etc/systemd/system/smartdns-cert.service || true
 install_payload CERT_TIMER   /etc/systemd/system/smartdns-cert.timer   || true
 systemctl daemon-reload
@@ -1061,6 +1461,11 @@ EOF
                info "added $RELAY_IP to the relays this panel serves" ;;
         esac
     fi
+    # What a re-run or an upgrade keeps, unasked.
+    set_env_key /etc/smart-dns/panel.env TUNNEL "$TUNNEL"
+    set_env_key /etc/smart-dns/panel.env TUNNEL_TRANSPORT "${TUNNEL_TRANSPORT:-}"
+    set_env_key /etc/smart-dns/panel.env TUNNEL_DIRECTION "${TUNNEL_DIRECTION:-}"
+    set_env_key /etc/smart-dns/panel.env TUNNEL_PORT "${TUNNEL_PORT:-}"
     umask 022
     chmod 600 /etc/smart-dns/panel.env
 
@@ -1073,6 +1478,12 @@ EOF
     mkdir -p /usr/local/share/smart-dns
     note_file /usr/local/share/smart-dns/services.json
     payload SERVICES > /usr/local/share/smart-dns/services.json
+    # Only the relays reach the sync API. The panel's service runs this before
+    # every start, so a relay added to RELAY_IP by hand is let in the next time
+    # the panel restarts - exactly when the panel itself would let it in.
+    note_file /usr/local/bin/smartdns-api-guard
+    payload SMARTDNS_API_GUARD > /usr/local/bin/smartdns-api-guard
+    chmod +x /usr/local/bin/smartdns-api-guard
     install_payload PANEL_SERVICE /etc/systemd/system/smartdns-panel.service || true
     systemctl daemon-reload
     enable_service smartdns-panel.service
@@ -1082,6 +1493,11 @@ EOF
         info "sync API is up on :8443"
     else
         warn "the panel did not start - journalctl -u smartdns-panel"
+    fi
+    if nft list table inet smartdns_api >/dev/null 2>&1; then
+        info "port 8443 answers the relays only: $(sed -n 's/^RELAY_IP=//p' /etc/smart-dns/panel.env | head -1)"
+    else
+        warn "port 8443 could not be closed to strangers - the panel still refuses them itself"
     fi
 
     # ---- admin web panel -------------------------------------------------
@@ -1142,6 +1558,7 @@ EOF
                 8446) die "port 8446 is the exit's own route to Google over IPv6" ;;
                 53|80|443) die "port $ADMIN_PORT is the service's own - pick
     another. 22, 53, 80, 443, 8443 and 8446 are all taken." ;;
+                "${TUNNEL_PORT:-none}") die "port $ADMIN_PORT carries the tunnel - pick another" ;;
             esac
             # The path stays generated. Nobody types it from memory, and an
             # operator asked to invent one invents a guessable one.
@@ -1185,7 +1602,8 @@ EOF
 
     FP="$(openssl x509 -in /etc/smart-dns/sync.crt -noout -fingerprint -sha256 \
           | cut -d= -f2 | tr -d ':' | tr 'A-Z' 'a-z')"
-    SYNC_TOKEN_OUT="$SYNC_SECRET.$FP"
+    # A third part when there is a tunnel, so the relay sets up the same one.
+    SYNC_TOKEN_OUT="$SYNC_SECRET.$FP${TUNNEL_SPEC:+.$TUNNEL_SPEC}"
 fi
 
 # A relay that is already paired keeps its pairing. Requiring the token again
@@ -1203,8 +1621,9 @@ if [ "$ROLE" = relay ] && [ -n "${SYNC_TOKEN:-}" ]; then
     # secret.fingerprint - one string for the user to copy, carrying both the
     # shared secret and the certificate to pin. Splitting them into two
     # questions only creates a chance to paste one and forget the other.
-    SECRET="${SYNC_TOKEN%%.*}"
-    FINGER="${SYNC_TOKEN##*.}"
+    # The third part, when there is one, is the tunnel, read further up.
+    SECRET="$(printf '%s' "$SYNC_TOKEN" | cut -d. -f1)"
+    FINGER="$(printf '%s' "$SYNC_TOKEN" | cut -s -d. -f2)"
     [ -n "$SECRET" ] && [ -n "$FINGER" ] && [ "$SECRET" != "$FINGER" ] \
         || die "that does not look like a pairing token.
     It is the whole 'secret.fingerprint' line the exit server printed."
@@ -1247,6 +1666,10 @@ EOF
         set_env_key /etc/smart-dns/sync.env SELF_IP "$RELAY_IP"
         set_env_key /etc/smart-dns/sync.env PANEL_DOMAIN "${PANEL_DOMAIN:-}"
     fi
+    set_env_key /etc/smart-dns/sync.env TUNNEL "$TUNNEL"
+    set_env_key /etc/smart-dns/sync.env TUNNEL_TRANSPORT "${TUNNEL_TRANSPORT:-}"
+    set_env_key /etc/smart-dns/sync.env TUNNEL_DIRECTION "${TUNNEL_DIRECTION:-}"
+    set_env_key /etc/smart-dns/sync.env TUNNEL_PORT "${TUNNEL_PORT:-}"
     umask 022
     chmod 600 /etc/smart-dns/sync.env
 
@@ -1305,6 +1728,9 @@ EOF
     fi
 fi
 
+# ---------------------------------------------------------------- tunnel
+if [ "$ROLE" = exit ]; then apply_tunnel "${SYNC_SECRET:-}"; else apply_tunnel "${SECRET:-}"; fi
+
 # ---------------------------------------------------------------- start
 step "Starting services"
 if [ "$NGINX_CHANGED" = 1 ]; then systemctl restart nginx
@@ -1358,6 +1784,24 @@ if [ "$ROLE" = relay ]; then
     # in the customer's panel instead.
     check "the exit's sync API answers this relay" \
           "$(curl -sk -o /dev/null -m 20 --resolve "${PANEL_DOMAIN:-sync.example.com}:8443:${EXIT_IP}" -w '%{http_code}' "https://${PANEL_DOMAIN:-sync.example.com}:8443/" 2>/dev/null || true)" "501"
+fi
+if [ "$TUNNEL" = backpack ]; then
+    check "the tunnel service is running" "$(systemctl is-active smartdns-tunnel.service)" active
+    if [ "$ROLE" = relay ]; then
+        # Straight at the tunnel's own end, so that the fallback in nginx
+        # cannot pass this for it. The far end may still be dialling in.
+        tun=000
+        for i in $(seq 1 20); do
+            tun="$(curl -s -o /dev/null -m 8 --connect-to "github.com:443:127.0.0.1:$TUNNEL_LOCAL_HTTPS" \
+                   -w '%{http_code}' https://github.com/ 2>/dev/null || true)"
+            [ "$tun" = 200 ] && break
+            sleep 3
+        done
+        check "a site loads through the tunnel" "$tun" 200
+        [ "$tun" = 200 ] || warn "customers still get through - nginx falls back to the direct path -
+    but the tunnel is not carrying them. Is port $TUNNEL_PORT open between the two
+    machines? Or try another transport: re-run the installer on the exit."
+    fi
 fi
 
 printf '\n'
@@ -1444,6 +1888,13 @@ if [ -n "$ADMIN_URL_OUT" ]; then
 ' "$B" "$N" "$ADMIN_URL_OUT" "$ADMIN_PASS_OUT"
 fi
 
+if [ "$TUNNEL" = backpack ]; then
+    printf '    %sTunnel%s - %s. The relay'"'"'s nginx goes through it, and
+    straight to the exit only while it is down. Its log is in smartdns-logs.
+
+' "$B" "$N" "$TUNNEL_OUT"
+fi
+
 if [ -n "$SYNC_TOKEN_OUT" ]; then
     printf '    %sPairing token%s - run the installer on the relay and paste this when
     it asks. It carries both the shared secret and the fingerprint of this
@@ -1453,5 +1904,14 @@ if [ -n "$SYNC_TOKEN_OUT" ]; then
 
 ' "$B" "$N" "$SYNC_TOKEN_OUT"
 fi
+
+# The tunnel was asked again here: the relay has not heard yet, and it will not
+# until it is given the token above.
+if [ -n "${ASK_TUNNEL:-}" ] && [ "$ROLE" = exit ]; then
+    printf '    %sNow the relay%s: run the installer there with --tunnel and paste the\n' "$Y" "$N"
+    printf '    pairing token above. Until then it goes straight to this exit.\n\n'
+fi
+
+printf '    Every command there is, in one menu:  %ssudo smartdns-menu%s\n\n' "$B" "$N"
 
 exit 0

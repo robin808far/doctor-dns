@@ -5,6 +5,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# Only the relays reach port 8443, from the RELAY_IP this panel reads. The +
+# runs it outside the sandbox below, which firewall rules need; the - lets the
+# panel start even where there is no nft.
+ExecStartPre=-+/usr/local/bin/smartdns-api-guard
 ExecStart=/usr/local/bin/smartdns-panel
 Restart=always
 RestartSec=10

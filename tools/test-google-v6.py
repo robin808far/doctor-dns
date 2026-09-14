@@ -64,8 +64,11 @@ check("the hop is on loopback only", "listen 127.0.0.1:8446;" in stream
 check("and asks its resolver for AAAA records only", "resolver 1.1.1.1 ipv4=off;" in stream)
 check("the public server still resolves over IPv4 only",
       stream.index("resolver 1.1.1.1 ipv6=off;") < stream.index("listen 443;"))
-check("only the relay may use the public server",
-      "allow __RELAY_IP__;\n        deny all;" in stream)
+# The relay, and loopback - where the tunnel's end on this machine hands its
+# connections in. Nobody else.
+check("only the relay, and the tunnel's end on this machine, may use the public server",
+      re.search(r"allow __RELAY_IP__;\n(?:\s*#[^\n]*\n)*\s*allow 127\.0\.0\.1;\n\s*deny all;",
+                stream) is not None)
 check("the block opens and closes in pairs",
       stream.count("# google-v6 begin") == 2 and stream.count("# google-v6 end") == 2)
 
