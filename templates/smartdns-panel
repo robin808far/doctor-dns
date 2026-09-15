@@ -787,7 +787,9 @@ class Store:
                     if not grp.get("opt_in"):
                         out.extend(grp["domains"])
                     continue
-                if (svc["key"], grp["key"]) in routed:
+                # A locked group is never routed, whatever a template says:
+                # routing it can only break the thing it belongs to.
+                if (svc["key"], grp["key"]) in routed and not grp.get("locked"):
                     out.extend(d for d in grp["domains"] if d not in off)
         return sorted(set(out))
 
@@ -815,7 +817,9 @@ class Store:
             if svc["key"] == "custom":
                 continue
             for grp in svc["groups"]:
-                if (svc["key"], grp["key"]) not in routed:
+                # A locked group is bypassed for every template - a tick left
+                # in the database from before the lock included.
+                if grp.get("locked") or (svc["key"], grp["key"]) not in routed:
                     out.extend(grp["domains"])
                 else:
                     # The group is routed, minus whatever was switched off

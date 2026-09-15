@@ -38,7 +38,7 @@ STAMP="$(date +%Y%m%d-%H%M%S)"
 # What this file is. Written to the machine once an install finishes, so the
 # next run can tell whether it is an upgrade, a re-run, or somebody about to
 # put an older version over a newer one by accident.
-VERSION="0.5.0"
+VERSION="0.5.1"
 
 # What this install did, so uninstall can undo exactly that and nothing more.
 # Without it, removal would be guesswork: whether dnsmasq was ours or already
@@ -4018,7 +4018,9 @@ exit 0
 #                    if not grp.get("opt_in"):
 #                        out.extend(grp["domains"])
 #                    continue
-#                if (svc["key"], grp["key"]) in routed:
+#                # A locked group is never routed, whatever a template says:
+#                # routing it can only break the thing it belongs to.
+#                if (svc["key"], grp["key"]) in routed and not grp.get("locked"):
 #                    out.extend(d for d in grp["domains"] if d not in off)
 #        return sorted(set(out))
 #
@@ -4046,7 +4048,9 @@ exit 0
 #            if svc["key"] == "custom":
 #                continue
 #            for grp in svc["groups"]:
-#                if (svc["key"], grp["key"]) not in routed:
+#                # A locked group is bypassed for every template - a tick left
+#                # in the database from before the lock included.
+#                if grp.get("locked") or (svc["key"], grp["key"]) not in routed:
 #                    out.extend(grp["domains"])
 #                else:
 #                    # The group is routed, minus whatever was switched off
@@ -5796,73 +5800,114 @@ exit 0
 #
 #
 ## ------------------------------------------------------------- user panel
-#USER_CSS = """
+## Every colour is named once, here, with the admin panel's names and values.
+## The light theme is the same names with other values, so no rule below can
+## be left dark in one of them. Until the customer picks, their browser's own
+## setting decides; the button in the corner overrides it for that browser.
+#DARK = """color-scheme:dark;
+# --bg:#0f1115;--card:#171a21;--line:#262b36;--line2:#30363d;--row:#1c2029;
+# --track:#0f1115;--fg:#e6e8eb;--head:#c9d1d9;--muted:#8b949e;--dim:#9aa4b2;
+# --faint:#6e7681;--accent:#7dd3a0;--accent2:#58a6ff;--btn:#238636;
+# --btn-hover:#2ea043;--on-btn:#ffffff;--danger:#6e2c2c;--warn:#e3b341;
+# --bad:#f85149;--good-bg:#12261a;--err-bg:#2b1416;--warn-bg:#2b2411;
+# --warn-line:#6e5a2c;--sun:inline;--moon:none"""
+#LIGHT = """color-scheme:light;
+# --bg:#f6f8fa;--card:#ffffff;--line:#d0d7de;--line2:#afb8c1;--row:#eaeef2;
+# --track:#eaeef2;--fg:#1f2328;--head:#24292f;--muted:#59636e;--dim:#57606a;
+# --faint:#6e7781;--accent:#1a7f37;--accent2:#0969da;--btn:#1f883d;
+# --btn-hover:#1a7f37;--on-btn:#ffffff;--danger:#cf222e;--warn:#9a6700;
+# --bad:#cf222e;--good-bg:#dafbe1;--err-bg:#ffebe9;--warn-bg:#fff8c5;
+# --warn-line:#d4a72c;--sun:none;--moon:inline"""
+#THEME_CSS = (":root{%s}\n"
+#             "@media (prefers-color-scheme: light){:root:not([data-theme=dark]){%s}}\n"
+#             ":root[data-theme=light]{%s}\n" % (DARK, LIGHT, LIGHT))
+## In <head>, so a page opens in the chosen theme instead of flashing the
+## other one first. Only the two known values are taken from storage.
+#THEME_HEAD = ("<script>try{var t=localStorage.getItem('theme');"
+#              "if(t=='light'||t=='dark')document.documentElement"
+#              ".setAttribute('data-theme',t)}catch(e){}</script>")
+#THEME_BUTTON = (
+#    "<button type='button' class='theme' title='روشن / تیره' aria-label='روشن / تیره'"
+#    " onclick=\"(function(r){var c=r.getAttribute('data-theme')||"
+#    "(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'),"
+#    "n=c=='light'?'dark':'light';r.setAttribute('data-theme',n);"
+#    "try{localStorage.setItem('theme',n)}catch(e){}})(document.documentElement)\">"
+#    "<span class='sun'>☀️</span><span class='moon'>🌙</span></button>")
+#
+#USER_CSS = THEME_CSS + """
 #*{box-sizing:border-box}
-#body{margin:0;background:#0f1115;color:#e6e8eb;
-# font:15px/1.9 system-ui,'Segoe UI',Tahoma,sans-serif;
+#body{margin:0;background:var(--bg);color:var(--fg);
+# font:15px/1.9 system-ui,'Segoe UI',Tahoma,sans-serif;position:relative;
 # display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}
-#.card{background:#171a21;border:1px solid #262b36;border-radius:16px;
+#.card{background:var(--card);border:1px solid var(--line);border-radius:16px;
 # padding:26px;max-width:440px;width:100%}
 #h1{font-size:18px;margin:0 0 4px;font-weight:600}
-#.sub{color:#8b949e;font-size:13px;margin-bottom:20px}
+#.sub{color:var(--muted);font-size:13px;margin-bottom:20px}
 #.row{display:flex;justify-content:space-between;align-items:baseline;
-# padding:11px 0;border-bottom:1px solid #1c2029}
+# padding:11px 0;border-bottom:1px solid var(--row)}
 #.row:last-of-type{border-bottom:0}
-#.k{color:#8b949e;font-size:13px}
+#.k{color:var(--muted);font-size:13px}
 #.v{font-weight:600}
-#code{background:#0f1115;padding:3px 9px;border-radius:6px;color:#7dd3a0;font-size:14px}
-#.bar{height:8px;background:#0f1115;border-radius:4px;overflow:hidden;margin-top:10px}
-#.bar i{display:block;height:100%;background:#7dd3a0}
-#.bar i.warn{background:#e3b341}
-#.bar i.hot{background:#f85149}
+#code{background:var(--bg);padding:3px 9px;border-radius:6px;color:var(--accent);font-size:14px}
+#.bar{height:8px;background:var(--track);border-radius:4px;overflow:hidden;margin-top:10px}
+#.bar i{display:block;height:100%;background:var(--accent)}
+#.bar i.warn{background:var(--warn)}
+#.bar i.hot{background:var(--bad)}
 #button,a.btn{display:block;width:100%;margin-top:18px;padding:13px;font:inherit;
 # font-weight:600;text-align:center;text-decoration:none;
-# background:#238636;color:#fff;border:0;border-radius:10px;cursor:pointer}
-#button:hover,a.btn:hover{background:#2ea043}
-#button.ghost,a.btn.ghost{background:transparent;border:1px solid #30363d;
-# color:#9aa4b2;font-weight:400}
-#button.ghost:hover,a.btn.ghost:hover{background:#1c2029}
-#label{display:block;color:#8b949e;font-size:12px;margin:14px 0 6px}
-#input{width:100%;padding:12px;font:inherit;background:#0f1115;color:#e6e8eb;
-# border:1px solid #30363d;border-radius:10px}
-#input:focus{outline:0;border-color:#238636}
-#.alt{text-align:center;margin-top:18px;font-size:13px;color:#8b949e}
-#.alt a{color:#7dd3a0}
+# background:var(--btn);color:var(--on-btn);border:0;border-radius:10px;cursor:pointer}
+#button:hover,a.btn:hover{background:var(--btn-hover)}
+#button.ghost,a.btn.ghost{background:transparent;border:1px solid var(--line2);
+# color:var(--dim);font-weight:400}
+#button.ghost:hover,a.btn.ghost:hover{background:var(--row)}
+#label{display:block;color:var(--muted);font-size:12px;margin:14px 0 6px}
+#input{width:100%;padding:12px;font:inherit;background:var(--bg);color:var(--fg);
+# border:1px solid var(--line2);border-radius:10px}
+#input:focus{outline:0;border-color:var(--btn)}
+#.alt{text-align:center;margin-top:18px;font-size:13px;color:var(--muted)}
+#.alt a{color:var(--accent)}
 #.big{font-size:22px;font-weight:600;text-align:center;letter-spacing:.5px;
-# background:#0f1115;border:1px solid #262b36;border-radius:12px;padding:18px;
-# color:#7dd3a0;margin:6px 0 4px;direction:ltr}
-#.note{color:#8b949e;font-size:12px;line-height:1.8;margin-top:16px}
+# background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:18px;
+# color:var(--accent);margin:6px 0 4px;direction:ltr}
+#.note{color:var(--muted);font-size:12px;line-height:1.8;margin-top:16px}
 #.msg{padding:11px 14px;border-radius:9px;margin-bottom:16px;font-size:13px}
-#.msg.good{background:#12261a;border:1px solid #238636}
-#.msg.err{background:#2b1416;border:1px solid #6e2c2c}
-#.msg.warnbox{background:#2b2411;border:1px solid #6e5a2c}
+#.msg.good{background:var(--good-bg);border:1px solid var(--btn)}
+#.msg.err{background:var(--err-bg);border:1px solid var(--danger)}
+#.msg.warnbox{background:var(--warn-bg);border:1px solid var(--warn-line)}
 #.icon{font-size:40px;text-align:center;line-height:1;margin-bottom:12px}
-#.dns{margin-top:20px;padding:16px;background:#0f1115;border:1px solid #262b36;
+#.dns{margin-top:20px;padding:16px;background:var(--bg);border:1px solid var(--line);
 # border-radius:12px}
-#.dns .k{color:#8b949e;font-size:12px;margin-bottom:8px}
+#.dns .k{color:var(--muted);font-size:12px;margin-bottom:8px}
 #.dns .big{margin:0}
 #.dns .note{margin-top:12px}
 #.dns input[type=file]{width:100%;padding:10px;font-size:12px;
-# border:1px dashed #30363d;background:transparent;margin-bottom:4px}
-#details.pw{margin-top:16px;border:1px solid #262b36;border-radius:12px;
-# background:#0f1115}
-#details.pw>summary{padding:14px 16px;cursor:pointer;color:#9aa4b2;font-size:13px;
+# border:1px dashed var(--line2);background:transparent;margin-bottom:4px}
+#details.pw{margin-top:16px;border:1px solid var(--line);border-radius:12px;
+# background:var(--bg)}
+#details.pw>summary{padding:14px 16px;cursor:pointer;color:var(--dim);font-size:13px;
 # list-style:none}
 #details.pw>summary::-webkit-details-marker{display:none}
-#details.pw>summary::before{content:'b8';margin-left:8px;font-size:11px}
-#details.pw[open]>summary::before{content:'be'}
+#details.pw>summary::before{content:'▸';margin-left:8px;font-size:11px}
+#details.pw[open]>summary::before{content:'▾'}
 #details.pw form{padding:0 16px 4px}
 #details.pw .note{padding:0 16px 14px;margin-top:8px}
-#.ok{color:#7dd3a0}.bad{color:#f85149}.warn{color:#e3b341}
+#.ok{color:var(--accent)}.bad{color:var(--bad)}.warn{color:var(--warn)}
 #.shell{width:100%;max-width:440px}
 #.brand{text-align:center;margin:0 0 18px;direction:ltr;line-height:1.15}
 #.brand .mark{font-size:30px;vertical-align:middle;margin-right:8px}
 #.brand .name{display:inline-block;vertical-align:middle;font-size:clamp(32px,10vw,42px);
-# font-weight:800;letter-spacing:1.5px;color:#7dd3a0;
-# background:linear-gradient(90deg,#7dd3a0,#58a6ff);-webkit-background-clip:text;
+# font-weight:800;letter-spacing:1.5px;color:var(--accent);
+# background:linear-gradient(90deg,var(--accent),var(--accent2));-webkit-background-clip:text;
 # background-clip:text;-webkit-text-fill-color:transparent}
-#footer{text-align:center;color:#6e7681;font-size:12px;padding:16px 0 0;direction:ltr}
+#footer{text-align:center;color:var(--faint);font-size:12px;padding:16px 0 0;direction:ltr}
 #.manual input{direction:ltr;text-align:center;letter-spacing:.5px}
+#@media (max-width:480px){.brand{margin-top:40px}}
+#button.theme{position:absolute;top:14px;left:14px;width:38px;height:38px;margin:0;
+# padding:0;display:flex;align-items:center;justify-content:center;border-radius:50%;
+# background:var(--card);border:1px solid var(--line2);color:var(--fg);
+# font-size:17px;font-weight:400;line-height:1;cursor:pointer}
+#button.theme:hover{background:var(--row)}
+#.theme .sun{display:var(--sun)}.theme .moon{display:var(--moon)}
 #"""
 #
 ## Where the installer writes the version it installed. Read per page rather
@@ -5901,9 +5946,10 @@ exit 0
 #def user_page(inner):
 #    return ("""<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8">
 #<meta name="viewport" content="width=device-width,initial-scale=1">
-#<title>%s</title><style>%s</style></head><body>
+#<title>%s</title>%s<style>%s</style></head><body>%s
 #<div class="shell">%s<div class="card">%s</div>%s</div></body></html>"""
-#            % (html.escape(brand()), USER_CSS, brand_html(), inner, footer_html()))
+#            % (html.escape(brand()), THEME_HEAD, USER_CSS, THEME_BUTTON,
+#               brand_html(), inner, footer_html()))
 #
 #
 ## A Persian keyboard types these, and the address box should not care.
@@ -7073,88 +7119,129 @@ exit 0
 #
 #
 ## -------------------------------------------------------------------- pages
-#CSS = """
+## Every colour is named once, here. The light theme is the same names with
+## other values, so no rule below can be left dark in one of them. Until
+## somebody picks, the browser's own setting decides; the button in the corner
+## overrides it, and the choice is kept in that browser.
+#DARK = """color-scheme:dark;
+# --bg:#0f1115;--card:#171a21;--line:#262b36;--line2:#30363d;--row:#1c2029;
+# --track:#0f1115;--fg:#e6e8eb;--head:#c9d1d9;--muted:#8b949e;--dim:#9aa4b2;
+# --faint:#6e7681;--accent:#7dd3a0;--accent2:#58a6ff;--btn:#238636;
+# --btn-hover:#2ea043;--on-btn:#ffffff;--danger:#6e2c2c;--warn:#e3b341;
+# --bad:#f85149;--good-bg:#12261a;--err-bg:#2b1416;--warn-bg:#2b2411;
+# --warn-line:#6e5a2c;--sun:inline;--moon:none"""
+#LIGHT = """color-scheme:light;
+# --bg:#f6f8fa;--card:#ffffff;--line:#d0d7de;--line2:#afb8c1;--row:#eaeef2;
+# --track:#eaeef2;--fg:#1f2328;--head:#24292f;--muted:#59636e;--dim:#57606a;
+# --faint:#6e7781;--accent:#1a7f37;--accent2:#0969da;--btn:#1f883d;
+# --btn-hover:#1a7f37;--on-btn:#ffffff;--danger:#cf222e;--warn:#9a6700;
+# --bad:#cf222e;--good-bg:#dafbe1;--err-bg:#ffebe9;--warn-bg:#fff8c5;
+# --warn-line:#d4a72c;--sun:none;--moon:inline"""
+#THEME_CSS = (":root{%s}\n"
+#             "@media (prefers-color-scheme: light){:root:not([data-theme=dark]){%s}}\n"
+#             ":root[data-theme=light]{%s}\n" % (DARK, LIGHT, LIGHT))
+## In <head>, so a page opens in the chosen theme instead of flashing the
+## other one first. Only the two known values are taken from storage.
+#THEME_HEAD = ("<script>try{var t=localStorage.getItem('theme');"
+#              "if(t=='light'||t=='dark')document.documentElement"
+#              ".setAttribute('data-theme',t)}catch(e){}</script>")
+#THEME_BUTTON = (
+#    "<button type='button' class='theme' title='روشن / تیره' aria-label='روشن / تیره'"
+#    " onclick=\"(function(r){var c=r.getAttribute('data-theme')||"
+#    "(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'),"
+#    "n=c=='light'?'dark':'light';r.setAttribute('data-theme',n);"
+#    "try{localStorage.setItem('theme',n)}catch(e){}})(document.documentElement)\">"
+#    "<span class='sun'>☀️</span><span class='moon'>🌙</span></button>")
+#
+#CSS = THEME_CSS + """
 #*{box-sizing:border-box}
-#body{margin:0;background:#0f1115;color:#e6e8eb;font:14px/1.7 system-ui,'Segoe UI',Tahoma,sans-serif}
-#a{color:#7dd3a0;text-decoration:none}
+#body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.7 system-ui,'Segoe UI',Tahoma,sans-serif;
+# position:relative}
+#a{color:var(--accent);text-decoration:none}
 #.wrap{max-width:1000px;margin:0 auto;padding:24px}
 #header{display:flex;align-items:center;justify-content:space-between;
-# border-bottom:1px solid #262b36;padding-bottom:14px;margin-bottom:22px;flex-wrap:wrap;gap:12px}
+# border-bottom:1px solid var(--line);padding-bottom:14px;margin-bottom:22px;flex-wrap:wrap;gap:12px}
 #h1{font-size:18px;margin:0;font-weight:600}
-#nav a{margin-left:16px;color:#9aa4b2;font-size:14px}
-#nav a.on{color:#7dd3a0;font-weight:600}
-#.card{background:#171a21;border:1px solid #262b36;border-radius:12px;padding:18px;margin-bottom:16px}
-#.card h2{font-size:15px;margin:0 0 14px;font-weight:600;color:#c9d1d9}
+#nav a{margin-left:16px;color:var(--dim);font-size:14px}
+#nav a.on{color:var(--accent);font-weight:600}
+#.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:16px}
+#.card h2{font-size:15px;margin:0 0 14px;font-weight:600;color:var(--head)}
 #table{width:100%;border-collapse:collapse;font-size:13px}
-#th{text-align:right;color:#8b949e;font-weight:500;padding:8px 6px;border-bottom:1px solid #262b36}
-#td{padding:9px 6px;border-bottom:1px solid #1c2029}
+#th{text-align:right;color:var(--muted);font-weight:500;padding:8px 6px;border-bottom:1px solid var(--line)}
+#td{padding:9px 6px;border-bottom:1px solid var(--row)}
 #tr:last-child td{border-bottom:0}
-#code{background:#0f1115;padding:2px 6px;border-radius:5px;color:#7dd3a0;font-size:12px}
+#code{background:var(--bg);padding:2px 6px;border-radius:5px;color:var(--accent);font-size:12px}
 #.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}
-#.stat{background:#0f1115;border:1px solid #262b36;border-radius:10px;padding:14px}
+#.stat{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:14px}
 #.stat .n{font-size:21px;font-weight:600}
-#.stat .l{color:#8b949e;font-size:12px;margin-top:3px}
-#.bar{height:6px;background:#0f1115;border-radius:3px;overflow:hidden;margin-top:7px}
-#.bar i{display:block;height:100%;background:#7dd3a0}
-#.bar i.warn{background:#e3b341}
-#.bar i.hot{background:#f85149}
-#input,select,button,textarea{font:inherit;background:#0f1115;color:#e6e8eb;
-# border:1px solid #30363d;border-radius:7px;padding:8px 10px}
-#button{background:#238636;border-color:#238636;cursor:pointer;font-weight:600}
-#button:hover{background:#2ea043}
-#button.danger{background:#6e2c2c;border-color:#6e2c2c}
-#button.ghost{background:transparent;border-color:#30363d;color:#9aa4b2;font-weight:400}
+#.stat .l{color:var(--muted);font-size:12px;margin-top:3px}
+#.bar{height:6px;background:var(--track);border-radius:3px;overflow:hidden;margin-top:7px}
+#.bar i{display:block;height:100%;background:var(--accent)}
+#.bar i.warn{background:var(--warn)}
+#.bar i.hot{background:var(--bad)}
+#input,select,button,textarea{font:inherit;background:var(--bg);color:var(--fg);
+# border:1px solid var(--line2);border-radius:7px;padding:8px 10px}
+#button{background:var(--btn);border-color:var(--btn);color:var(--on-btn);cursor:pointer;font-weight:600}
+#button:hover{background:var(--btn-hover)}
+#button.danger{background:var(--danger);border-color:var(--danger)}
+#button.ghost{background:transparent;border-color:var(--line2);color:var(--dim);font-weight:400}
 #form.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-#.muted{color:#8b949e;font-size:12px}
-#.ok{color:#7dd3a0}.bad{color:#f85149}.warn{color:#e3b341}
+#.muted{color:var(--muted);font-size:12px}
+#.ok{color:var(--accent)}.bad{color:var(--bad)}.warn{color:var(--warn)}
 #.msg{padding:11px 14px;border-radius:9px;margin-bottom:16px;font-size:13px}
-#.msg.good{background:#12261a;border:1px solid #238636}
-#.msg.err{background:#2b1416;border:1px solid #6e2c2c}
-#label{display:block;color:#8b949e;font-size:12px;margin-bottom:5px}
+#.msg.good{background:var(--good-bg);border:1px solid var(--btn)}
+#.msg.err{background:var(--err-bg);border:1px solid var(--danger)}
+#label{display:block;color:var(--muted);font-size:12px;margin-bottom:5px}
 #.f{margin-bottom:12px}
 #.login{max-width:340px;margin:14vh auto}
-#.receipt{border:1px solid #262b36;border-radius:10px;padding:14px;
-# margin-bottom:14px;background:#0f1115}
+#.receipt{border:1px solid var(--line);border-radius:10px;padding:14px;
+# margin-bottom:14px;background:var(--bg)}
 #.receipt .who{font-size:14px;font-weight:600;margin-bottom:10px}
 #.receipt img{max-width:100%;max-height:420px;border-radius:8px;
-# border:1px solid #262b36;display:block}
+# border:1px solid var(--line);display:block}
 #td.acts{white-space:nowrap}
 #td.acts form{display:inline}
 #td.acts button{padding:6px 10px;font-size:12px;margin-right:4px}
-#a.dl{display:inline-block;background:#238636;color:#fff;font-weight:600;
+#a.dl{display:inline-block;background:var(--btn);color:var(--on-btn);font-weight:600;
 # padding:9px 16px;border-radius:7px;text-decoration:none}
-#a.dl:hover{background:#2ea043}
+#a.dl:hover{background:var(--btn-hover)}
 #.svc{display:inline-block;margin:0 0 8px 14px}
-#.svc label{display:inline;color:#e6e8eb;font-size:13px}
-#details.svc{display:block;margin:0 0 6px;border:1px solid #262b36;border-radius:9px;
-# background:#0f1115}
+#.svc label{display:inline;color:var(--fg);font-size:13px}
+#details.svc{display:block;margin:0 0 6px;border:1px solid var(--line);border-radius:9px;
+# background:var(--bg)}
 #details.svc>summary{padding:9px 12px;cursor:pointer;list-style:none;
 # display:flex;align-items:center;gap:10px}
 #details.svc>summary::-webkit-details-marker{display:none}
-#details.svc>summary::before{content:'▸';color:#8b949e;font-size:11px;
+#details.svc>summary::before{content:'▸';color:var(--muted);font-size:11px;
 # transition:transform .12s}
 #details.svc[open]>summary::before{transform:rotate(-90deg)}
-#details.svc[open]{border-color:#30363d}
+#details.svc[open]{border-color:var(--line2)}
 #details.svc>summary label{flex:1}
 #.doms{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));
-# gap:2px 14px;padding:4px 30px 12px;border-top:1px solid #1c2029;margin-top:2px}
-#.doms label{display:flex;align-items:center;gap:7px;color:#9aa4b2;font-size:12px;
+# gap:2px 14px;padding:4px 30px 12px;border-top:1px solid var(--row);margin-top:2px}
+#.doms label{display:flex;align-items:center;gap:7px;color:var(--dim);font-size:12px;
 # font-family:ui-monospace,Consolas,monospace;margin:0;padding:2px 0}
 #.doms label span{direction:ltr;overflow:hidden;text-overflow:ellipsis;
 # white-space:nowrap}
 #.doms input{margin:0}
-#.optin{display:block;font-size:11px;color:#e3b341;font-weight:400;margin-top:2px}
+#.optin{display:block;font-size:11px;color:var(--warn);font-weight:400;margin-top:2px}
 #.pick{margin-right:auto;display:flex;gap:6px}
 #.pick button{padding:3px 10px;font-size:11px;font-weight:400;
-# background:transparent;border:1px solid #30363d;color:#8b949e}
-#.pick button:hover{background:#1c2029}
+# background:transparent;border:1px solid var(--line2);color:var(--muted)}
+#.pick button:hover{background:var(--row)}
 #.brand{text-align:center;margin:4px 0 26px;direction:ltr;line-height:1.15}
 #.brand .mark{font-size:clamp(28px,6vw,38px);vertical-align:middle;margin-right:10px}
 #.brand .name{display:inline-block;vertical-align:middle;font-size:clamp(34px,8vw,50px);
-# font-weight:800;letter-spacing:1.5px;color:#7dd3a0;
-# background:linear-gradient(90deg,#7dd3a0,#58a6ff);-webkit-background-clip:text;
+# font-weight:800;letter-spacing:1.5px;color:var(--accent);
+# background:linear-gradient(90deg,var(--accent),var(--accent2));-webkit-background-clip:text;
 # background-clip:text;-webkit-text-fill-color:transparent}
-#footer{text-align:center;color:#6e7681;font-size:12px;padding:26px 0 6px;direction:ltr}
+#footer{text-align:center;color:var(--faint);font-size:12px;padding:26px 0 6px;direction:ltr}
+#button.theme{position:absolute;top:14px;left:14px;width:38px;height:38px;margin:0;
+# padding:0;display:flex;align-items:center;justify-content:center;border-radius:50%;
+# background:var(--card);border:1px solid var(--line2);color:var(--fg);
+# font-size:17px;font-weight:400;line-height:1;cursor:pointer}
+#button.theme:hover{background:var(--row)}
+#.theme .sun{display:var(--sun)}.theme .moon{display:var(--moon)}
 #"""
 #
 ## Where the installer writes the version it installed. Read per page rather
@@ -7193,9 +7280,10 @@ exit 0
 #    return ("""<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8">
 #<meta name="viewport" content="width=device-width,initial-scale=1">
 #<link rel="icon" href="data:,">
-#<title>%s</title><style>%s</style></head><body><div class="wrap">%s
+#<title>%s</title>%s<style>%s</style></head><body>%s<div class="wrap">%s
 #<header><h1>%s</h1><nav>%s<a href='/%s/logout'>خروج</a></nav></header>
-#%s%s%s</div></body></html>""" % (html.escape(title), CSS, brand_html(),
+#%s%s%s</div></body></html>""" % (html.escape(title), THEME_HEAD, CSS,
+#                                 THEME_BUTTON, brand_html(),
 #                                 html.escape(title), nav, cfg["ADMIN_PATH"],
 #                                 banner, body, footer_html()))
 #
@@ -7208,14 +7296,14 @@ exit 0
 #    return """<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8">
 #<meta name="viewport" content="width=device-width,initial-scale=1">
 #<link rel="icon" href="data:,">
-#<title>ورود</title><style>%s</style></head><body><div class="wrap">%s
+#<title>ورود</title>%s<style>%s</style></head><body>%s<div class="wrap">%s
 #<div class="login" style="margin-top:6vh">
 #<div class="card"><h2>پنل مدیریت</h2>%s
 #<form method="post" action="/%s/"><div class="f"><label>رمز عبور</label>
 #<input type="password" name="password" autofocus style="width:100%%"></div>
 #<button type="submit" style="width:100%%">ورود</button></form></div>
-#</div>%s</div></body></html>""" % (CSS, brand_html(), err, cfg["ADMIN_PATH"],
-#                                   footer_html())
+#</div>%s</div></body></html>""" % (THEME_HEAD, CSS, THEME_BUTTON, brand_html(),
+#                                   err, cfg["ADMIN_PATH"], footer_html())
 #
 #
 #def bar(used, total):
@@ -8036,6 +8124,10 @@ exit 0
 #
 #        for svc in catalogue_now():
 #            for g in svc["groups"]:
+#                # A locked group is not a choice: it is bypassed for every
+#                # template, so it is not drawn where it could be ticked.
+#                if g.get("locked"):
+#                    continue
 #                key = "%s.%s" % (svc["key"], g["key"])
 #                on = (svc["key"], g["key"]) in groups
 #                label = (svc["label"] if len(svc["groups"]) == 1
@@ -8225,7 +8317,7 @@ exit 0
 #            except Exception as e:
 #                txt = str(e)
 #            out.append("<div class='card'><h2>%s</h2><pre style='overflow-x:auto;"
-#                       "font-size:12px;color:#9aa4b2;white-space:pre-wrap'>%s</pre>"
+#                       "font-size:12px;color:var(--dim);white-space:pre-wrap'>%s</pre>"
 #                       "</div>" % (unit, html.escape(txt or "(چیزی نیست)")))
 #        return "".join(out)
 #
@@ -8396,6 +8488,10 @@ exit 0
 #            STORE.run("DELETE FROM template_domains_off WHERE template_id = ?", (tid,))
 #            for svc in catalogue_now():
 #                for g in svc["groups"]:
+#                    # A locked group cannot be ticked, even by a form that
+#                    # sends it anyway.
+#                    if g.get("locked"):
+#                        continue
 #                    if "%s.%s" % (svc["key"], g["key"]) not in wanted:
 #                        continue
 #                    STORE.run("INSERT OR IGNORE INTO template_services"
@@ -11962,6 +12058,7 @@ exit 0
 #          "key": "ea",
 #          "label": "EA — سرورهای بازی",
 #          "opt_in": true,
+#          "locked": true,
 #          "note": "روشن کردنش بازی‌های EA را از سرور جدا می‌کند — این‌ها روی ۴۴۳ نیستند",
 #          "domains": [
 #            "gosredirector.ea.com",

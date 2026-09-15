@@ -1000,6 +1000,7 @@
           "key": "ea",
           "label": "EA — سرورهای بازی",
           "opt_in": true,
+          "locked": true,
           "note": "روشن کردنش بازی‌های EA را از سرور جدا می‌کند — این‌ها روی ۴۴۳ نیستند",
           "domains": [
             "gosredirector.ea.com",

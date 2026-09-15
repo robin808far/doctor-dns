@@ -847,73 +847,114 @@ def sync_loop():
 
 
 # ------------------------------------------------------------- user panel
-USER_CSS = """
+# Every colour is named once, here, with the admin panel's names and values.
+# The light theme is the same names with other values, so no rule below can
+# be left dark in one of them. Until the customer picks, their browser's own
+# setting decides; the button in the corner overrides it for that browser.
+DARK = """color-scheme:dark;
+ --bg:#0f1115;--card:#171a21;--line:#262b36;--line2:#30363d;--row:#1c2029;
+ --track:#0f1115;--fg:#e6e8eb;--head:#c9d1d9;--muted:#8b949e;--dim:#9aa4b2;
+ --faint:#6e7681;--accent:#7dd3a0;--accent2:#58a6ff;--btn:#238636;
+ --btn-hover:#2ea043;--on-btn:#ffffff;--danger:#6e2c2c;--warn:#e3b341;
+ --bad:#f85149;--good-bg:#12261a;--err-bg:#2b1416;--warn-bg:#2b2411;
+ --warn-line:#6e5a2c;--sun:inline;--moon:none"""
+LIGHT = """color-scheme:light;
+ --bg:#f6f8fa;--card:#ffffff;--line:#d0d7de;--line2:#afb8c1;--row:#eaeef2;
+ --track:#eaeef2;--fg:#1f2328;--head:#24292f;--muted:#59636e;--dim:#57606a;
+ --faint:#6e7781;--accent:#1a7f37;--accent2:#0969da;--btn:#1f883d;
+ --btn-hover:#1a7f37;--on-btn:#ffffff;--danger:#cf222e;--warn:#9a6700;
+ --bad:#cf222e;--good-bg:#dafbe1;--err-bg:#ffebe9;--warn-bg:#fff8c5;
+ --warn-line:#d4a72c;--sun:none;--moon:inline"""
+THEME_CSS = (":root{%s}\n"
+             "@media (prefers-color-scheme: light){:root:not([data-theme=dark]){%s}}\n"
+             ":root[data-theme=light]{%s}\n" % (DARK, LIGHT, LIGHT))
+# In <head>, so a page opens in the chosen theme instead of flashing the
+# other one first. Only the two known values are taken from storage.
+THEME_HEAD = ("<script>try{var t=localStorage.getItem('theme');"
+              "if(t=='light'||t=='dark')document.documentElement"
+              ".setAttribute('data-theme',t)}catch(e){}</script>")
+THEME_BUTTON = (
+    "<button type='button' class='theme' title='روشن / تیره' aria-label='روشن / تیره'"
+    " onclick=\"(function(r){var c=r.getAttribute('data-theme')||"
+    "(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'),"
+    "n=c=='light'?'dark':'light';r.setAttribute('data-theme',n);"
+    "try{localStorage.setItem('theme',n)}catch(e){}})(document.documentElement)\">"
+    "<span class='sun'>☀️</span><span class='moon'>🌙</span></button>")
+
+USER_CSS = THEME_CSS + """
 *{box-sizing:border-box}
-body{margin:0;background:#0f1115;color:#e6e8eb;
- font:15px/1.9 system-ui,'Segoe UI',Tahoma,sans-serif;
+body{margin:0;background:var(--bg);color:var(--fg);
+ font:15px/1.9 system-ui,'Segoe UI',Tahoma,sans-serif;position:relative;
  display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}
-.card{background:#171a21;border:1px solid #262b36;border-radius:16px;
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;
  padding:26px;max-width:440px;width:100%}
 h1{font-size:18px;margin:0 0 4px;font-weight:600}
-.sub{color:#8b949e;font-size:13px;margin-bottom:20px}
+.sub{color:var(--muted);font-size:13px;margin-bottom:20px}
 .row{display:flex;justify-content:space-between;align-items:baseline;
- padding:11px 0;border-bottom:1px solid #1c2029}
+ padding:11px 0;border-bottom:1px solid var(--row)}
 .row:last-of-type{border-bottom:0}
-.k{color:#8b949e;font-size:13px}
+.k{color:var(--muted);font-size:13px}
 .v{font-weight:600}
-code{background:#0f1115;padding:3px 9px;border-radius:6px;color:#7dd3a0;font-size:14px}
-.bar{height:8px;background:#0f1115;border-radius:4px;overflow:hidden;margin-top:10px}
-.bar i{display:block;height:100%;background:#7dd3a0}
-.bar i.warn{background:#e3b341}
-.bar i.hot{background:#f85149}
+code{background:var(--bg);padding:3px 9px;border-radius:6px;color:var(--accent);font-size:14px}
+.bar{height:8px;background:var(--track);border-radius:4px;overflow:hidden;margin-top:10px}
+.bar i{display:block;height:100%;background:var(--accent)}
+.bar i.warn{background:var(--warn)}
+.bar i.hot{background:var(--bad)}
 button,a.btn{display:block;width:100%;margin-top:18px;padding:13px;font:inherit;
  font-weight:600;text-align:center;text-decoration:none;
- background:#238636;color:#fff;border:0;border-radius:10px;cursor:pointer}
-button:hover,a.btn:hover{background:#2ea043}
-button.ghost,a.btn.ghost{background:transparent;border:1px solid #30363d;
- color:#9aa4b2;font-weight:400}
-button.ghost:hover,a.btn.ghost:hover{background:#1c2029}
-label{display:block;color:#8b949e;font-size:12px;margin:14px 0 6px}
-input{width:100%;padding:12px;font:inherit;background:#0f1115;color:#e6e8eb;
- border:1px solid #30363d;border-radius:10px}
-input:focus{outline:0;border-color:#238636}
-.alt{text-align:center;margin-top:18px;font-size:13px;color:#8b949e}
-.alt a{color:#7dd3a0}
+ background:var(--btn);color:var(--on-btn);border:0;border-radius:10px;cursor:pointer}
+button:hover,a.btn:hover{background:var(--btn-hover)}
+button.ghost,a.btn.ghost{background:transparent;border:1px solid var(--line2);
+ color:var(--dim);font-weight:400}
+button.ghost:hover,a.btn.ghost:hover{background:var(--row)}
+label{display:block;color:var(--muted);font-size:12px;margin:14px 0 6px}
+input{width:100%;padding:12px;font:inherit;background:var(--bg);color:var(--fg);
+ border:1px solid var(--line2);border-radius:10px}
+input:focus{outline:0;border-color:var(--btn)}
+.alt{text-align:center;margin-top:18px;font-size:13px;color:var(--muted)}
+.alt a{color:var(--accent)}
 .big{font-size:22px;font-weight:600;text-align:center;letter-spacing:.5px;
- background:#0f1115;border:1px solid #262b36;border-radius:12px;padding:18px;
- color:#7dd3a0;margin:6px 0 4px;direction:ltr}
-.note{color:#8b949e;font-size:12px;line-height:1.8;margin-top:16px}
+ background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:18px;
+ color:var(--accent);margin:6px 0 4px;direction:ltr}
+.note{color:var(--muted);font-size:12px;line-height:1.8;margin-top:16px}
 .msg{padding:11px 14px;border-radius:9px;margin-bottom:16px;font-size:13px}
-.msg.good{background:#12261a;border:1px solid #238636}
-.msg.err{background:#2b1416;border:1px solid #6e2c2c}
-.msg.warnbox{background:#2b2411;border:1px solid #6e5a2c}
+.msg.good{background:var(--good-bg);border:1px solid var(--btn)}
+.msg.err{background:var(--err-bg);border:1px solid var(--danger)}
+.msg.warnbox{background:var(--warn-bg);border:1px solid var(--warn-line)}
 .icon{font-size:40px;text-align:center;line-height:1;margin-bottom:12px}
-.dns{margin-top:20px;padding:16px;background:#0f1115;border:1px solid #262b36;
+.dns{margin-top:20px;padding:16px;background:var(--bg);border:1px solid var(--line);
  border-radius:12px}
-.dns .k{color:#8b949e;font-size:12px;margin-bottom:8px}
+.dns .k{color:var(--muted);font-size:12px;margin-bottom:8px}
 .dns .big{margin:0}
 .dns .note{margin-top:12px}
 .dns input[type=file]{width:100%;padding:10px;font-size:12px;
- border:1px dashed #30363d;background:transparent;margin-bottom:4px}
-details.pw{margin-top:16px;border:1px solid #262b36;border-radius:12px;
- background:#0f1115}
-details.pw>summary{padding:14px 16px;cursor:pointer;color:#9aa4b2;font-size:13px;
+ border:1px dashed var(--line2);background:transparent;margin-bottom:4px}
+details.pw{margin-top:16px;border:1px solid var(--line);border-radius:12px;
+ background:var(--bg)}
+details.pw>summary{padding:14px 16px;cursor:pointer;color:var(--dim);font-size:13px;
  list-style:none}
 details.pw>summary::-webkit-details-marker{display:none}
-details.pw>summary::before{content:'b8';margin-left:8px;font-size:11px}
-details.pw[open]>summary::before{content:'be'}
+details.pw>summary::before{content:'▸';margin-left:8px;font-size:11px}
+details.pw[open]>summary::before{content:'▾'}
 details.pw form{padding:0 16px 4px}
 details.pw .note{padding:0 16px 14px;margin-top:8px}
-.ok{color:#7dd3a0}.bad{color:#f85149}.warn{color:#e3b341}
+.ok{color:var(--accent)}.bad{color:var(--bad)}.warn{color:var(--warn)}
 .shell{width:100%;max-width:440px}
 .brand{text-align:center;margin:0 0 18px;direction:ltr;line-height:1.15}
 .brand .mark{font-size:30px;vertical-align:middle;margin-right:8px}
 .brand .name{display:inline-block;vertical-align:middle;font-size:clamp(32px,10vw,42px);
- font-weight:800;letter-spacing:1.5px;color:#7dd3a0;
- background:linear-gradient(90deg,#7dd3a0,#58a6ff);-webkit-background-clip:text;
+ font-weight:800;letter-spacing:1.5px;color:var(--accent);
+ background:linear-gradient(90deg,var(--accent),var(--accent2));-webkit-background-clip:text;
  background-clip:text;-webkit-text-fill-color:transparent}
-footer{text-align:center;color:#6e7681;font-size:12px;padding:16px 0 0;direction:ltr}
+footer{text-align:center;color:var(--faint);font-size:12px;padding:16px 0 0;direction:ltr}
 .manual input{direction:ltr;text-align:center;letter-spacing:.5px}
+@media (max-width:480px){.brand{margin-top:40px}}
+button.theme{position:absolute;top:14px;left:14px;width:38px;height:38px;margin:0;
+ padding:0;display:flex;align-items:center;justify-content:center;border-radius:50%;
+ background:var(--card);border:1px solid var(--line2);color:var(--fg);
+ font-size:17px;font-weight:400;line-height:1;cursor:pointer}
+button.theme:hover{background:var(--row)}
+.theme .sun{display:var(--sun)}.theme .moon{display:var(--moon)}
 """
 
 # Where the installer writes the version it installed. Read per page rather
@@ -952,9 +993,10 @@ def brand():
 def user_page(inner):
     return ("""<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>%s</title><style>%s</style></head><body>
+<title>%s</title>%s<style>%s</style></head><body>%s
 <div class="shell">%s<div class="card">%s</div>%s</div></body></html>"""
-            % (html.escape(brand()), USER_CSS, brand_html(), inner, footer_html()))
+            % (html.escape(brand()), THEME_HEAD, USER_CSS, THEME_BUTTON,
+               brand_html(), inner, footer_html()))
 
 
 # A Persian keyboard types these, and the address box should not care.

@@ -264,9 +264,10 @@ check("which the main resolver still reads",
       'BYPASS_CONF = "/etc/dnsmasq.d/bypass.conf"' in src)
 
 print("so ticking one of them really does route it")
+ps = {d for g in byp["groups"] if g["key"] == "playstation" for d in g["domains"]}
 ea = {d for g in byp["groups"] if g["key"] == "ea" for d in g["domains"]}
 cur = store.run("INSERT INTO templates (name, is_default, created_at)"
-                " VALUES ('EA کامل', 0, ?)", (panel.now(),))
+                " VALUES ('کامل با PS', 0, ?)", (panel.now(),))
 tid = cur.lastrowid
 for svc in cat:
     for g in svc["groups"]:
@@ -274,14 +275,41 @@ for svc in cat:
             store.run("INSERT INTO template_services (template_id,"
                       " service_key, group_key) VALUES (?,?,?)",
                       (tid, svc["key"], g["key"]))
-check("untouched, EA's game servers are bypassed",
-      ea <= set(store.bypass_for(tid, cat)))
+check("untouched, PlayStation's STUN hosts are bypassed",
+      ps <= set(store.bypass_for(tid, cat)))
+store.run("INSERT INTO template_services (template_id, service_key, group_key)"
+          " VALUES (?, 'bypass', 'playstation')", (tid,))
+left = set(store.bypass_for(tid, cat))
+check("ticked, not one of them is", not (ps & left), str(sorted(ps & left)))
+check("and they are routed instead", ps <= set(store.routed_for(tid, cat)))
+check("while the other groups stay bypassed",
+      {d for g in byp["groups"] if g["key"] != "playstation" for d in g["domains"]} <= left)
+
+print("EA's game servers are locked: bypassed for every template, never a choice")
+# They are not on 443, so routing them can only break EA's games - there is
+# no route on which a tick would help. So the group is not drawn where it
+# could be ticked, a tick that arrives anyway is not kept, and a tick already
+# in the database from before is ignored.
+check("the group is marked locked in the catalogue", groups["ea"].get("locked") is True)
+check("and it is the only one", [g["key"] for g in byp["groups"] if g.get("locked")] == ["ea"])
 store.run("INSERT INTO template_services (template_id, service_key, group_key)"
           " VALUES (?, 'bypass', 'ea')", (tid,))
-left = set(store.bypass_for(tid, cat))
-check("ticked, not one of them is", not (ea & left), str(sorted(ea & left)))
-check("and the other three stay bypassed",
-      {d for g in byp["groups"] if g["key"] != "ea" for d in g["domains"]} <= left)
+check("a tick already in the database does not route them",
+      ea <= set(store.bypass_for(tid, cat)) and not (ea & set(store.routed_for(tid, cat))),
+      str(sorted(ea & set(store.routed_for(tid, cat)))))
+check("nor on the default template", ea <= set(store.bypass_for(default, cat)))
+rec = Rec()
+rec.path = "/p/templates?t=%d" % tid
+page = rec.templates()
+check("the template editor does not draw it",
+      "value='bypass.ea'" not in page and "gosredirector.ea.com" not in page)
+check("while the other opt-in groups are still there to decide",
+      "value='bypass.playstation'" in page and "value='bypass.epic'" in page)
+Rec().action("template-save", {"id": [str(tid)], "g": ["bypass.ea", "spotify.main"]})
+check("a form that sends it anyway is not kept", ("bypass", "ea") not in store.template_groups(tid),
+      str(sorted(store.template_groups(tid))))
+check("and the rest of that form is", ("spotify", "main") in store.template_groups(tid))
+check("so EA stays bypassed", ea <= set(store.bypass_for(tid, cat)))
 
 print("the panel warns before somebody ticks it")
 adm = open(os.path.join(HERE, "..", "templates", "smartdns-admin"),
