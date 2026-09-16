@@ -181,6 +181,7 @@ geforce.com
 gemini.google.com
 getbootstrap.com
 getcaddy.com
+ggpht.com
 ghcr.io
 github.com
 githubapp.com
@@ -215,6 +216,7 @@ graphql.org
 gravatar.com
 groq.com
 gstatic.com
+gvt1.com
 hackerrank.com
 hashicorp.com
 helm.sh

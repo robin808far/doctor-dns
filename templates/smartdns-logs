@@ -49,6 +49,11 @@ elif [ -f "$ETC/panel.env" ]; then
     role=exit
     status="smartdns-panel smartdns-admin nginx smartdns-cert.timer"
     logs="smartdns-panel smartdns-admin nginx smartdns-cert"
+    # Only where there is an admin panel to show operators on.
+    if [ -f /etc/systemd/system/smartdns-operators.timer ]; then
+        status="$status smartdns-operators.timer"
+        logs="$logs smartdns-operators"
+    fi
 else
     echo "doctor dns is not installed on this machine" >&2
     exit 1

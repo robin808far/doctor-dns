@@ -27,6 +27,7 @@ import hmac
 import html
 import http.cookies
 import http.server
+import ipaddress
 import json
 import os
 import re
@@ -44,6 +45,12 @@ from datetime import datetime, timedelta, timezone
 CONFIG = "/etc/smart-dns/admin.env"
 DB = "/var/lib/smart-dns/panel.db"
 SERVICES_FILE = "/usr/local/share/smart-dns/services.json"
+# Put there by the installer and served from here - see above about CDNs. The
+# version goes in the font's address, so a browser's kept copy is never stale.
+FONT_FILE = "/usr/local/share/smart-dns/Vazirmatn.woff2"
+FONT_VERSION = "33.0.3"
+# Written once a day by smartdns-operators.
+OPERATORS_FILE = "/var/lib/smart-dns/operators.json"
 
 GB = 1024 ** 3
 SESSION_HOURS = 12
@@ -184,6 +191,59 @@ class Store:
             cur = self.db.execute(sql, args)
             self.db.commit()
             return cur
+
+    def delete_user(self, uid):
+        """Delete an account and everything that is only its; the addresses
+        it had, or None when there was no such account.
+
+        Its addresses, receipts and sign-ins go with it - the schema cascades
+        them. The usage readings are kept by address rather than by account,
+        so they are cleared here: whoever is given one of those addresses
+        next starts from nothing. One transaction, so a failure part-way
+        leaves the account exactly as it was.
+        """
+        with self.lock:
+            try:
+                ips = [r["ip"] for r in self.db.execute(
+                    "SELECT ip FROM ips WHERE user_id = ?", (uid,))]
+                if self.db.execute("DELETE FROM users WHERE id = ?",
+                                   (uid,)).rowcount == 0:
+                    self.db.rollback()
+                    return None
+                self.db.executemany("DELETE FROM ip_counters WHERE ip = ?",
+                                    [(ip,) for ip in ips])
+                self.db.commit()
+                return ips
+            except BaseException:
+                self.db.rollback()
+                raise
+
+    def reset_password(self, uid, password):
+        """Give an account a temporary password; False if there is no such
+        account, or it has no username to sign in with.
+
+        Every place it is signed in is closed in the same transaction, so
+        whoever might have had the old password is out by the time the new
+        one is on the screen. Its connection is not touched: the address stays
+        registered, and the service keeps working.
+        """
+        salt = secrets.token_hex(16)
+        with self.lock:
+            try:
+                if self.db.execute(
+                        "UPDATE users SET password_hash = ?, password_salt = ?,"
+                        " must_change_password = 1 WHERE id = ?"
+                        " AND COALESCE(username, '') != ''",
+                        (hash_password(password, salt), salt, uid)).rowcount == 0:
+                    self.db.rollback()
+                    return False
+                self.db.execute("DELETE FROM panel_sessions WHERE user_id = ?",
+                                (uid,))
+                self.db.commit()
+                return True
+            except BaseException:
+                self.db.rollback()
+                raise
 
     # The same two reads smartdns-panel does, spelled the same way. This panel
     # keeps its own connection rather than importing that one, so they are
@@ -344,8 +404,8 @@ THEME_BUTTON = (
 
 CSS = THEME_CSS + """
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.7 system-ui,'Segoe UI',Tahoma,sans-serif;
- position:relative}
+body{margin:0;background:var(--bg);color:var(--fg);
+ font:14px/1.7 Vazirmatn,system-ui,'Segoe UI',Tahoma,sans-serif;position:relative}
 a{color:var(--accent);text-decoration:none}
 .wrap{max-width:1000px;margin:0 auto;padding:24px}
 header{display:flex;align-items:center;justify-content:space-between;
@@ -374,6 +434,10 @@ button{background:var(--btn);border-color:var(--btn);color:var(--on-btn);cursor:
 button:hover{background:var(--btn-hover)}
 button.danger{background:var(--danger);border-color:var(--danger)}
 button.ghost{background:transparent;border-color:var(--line2);color:var(--dim);font-weight:400}
+button.del{background:transparent;border-color:var(--bad);color:var(--bad);font-weight:400}
+button.del:hover{background:var(--err-bg)}
+.onetime code{display:inline-block;direction:ltr;font-size:22px;letter-spacing:1px;
+ padding:8px 14px}
 form.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .muted{color:var(--muted);font-size:12px}
 .ok{color:var(--accent)}.bad{color:var(--bad)}.warn{color:var(--warn)}
@@ -456,6 +520,131 @@ def footer_html():
     return "<footer>doctor dns%s</footer>" % (" v" + html.escape(v) if v else "")
 
 
+def font_face(prefix):
+    """Vazirmatn, from this panel. swap: the page is readable in the system
+    font at once, on a slow line, and changes over when the font arrives."""
+    return ("@font-face{font-family:Vazirmatn;font-weight:100 900;"
+            "font-display:swap;src:url('%s/vazirmatn.woff2?v=%s') format('woff2')}\n"
+            % (prefix, FONT_VERSION))
+
+
+_FONT = []
+
+
+def font_bytes():
+    """The font file, read once. None while it is not there - an install
+    older than the font - and the pages fall back to the system font."""
+    if not _FONT:
+        try:
+            with open(FONT_FILE, "rb") as fh:
+                _FONT.append(fh.read())
+        except OSError:
+            return None
+    return _FONT[0]
+
+
+class Operators:
+    """Which operator an address is on, from smartdns-operators' daily file.
+
+    Read again only when the file changes. An address goes to the longest
+    block that holds it: one operator can announce a small block inside
+    another's larger one, and the smaller is what actually routes it.
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self.state = (None, [], {})     # mtime, lengths longest first, tables
+
+    def _tables(self):
+        try:
+            mtime = os.stat(self.path).st_mtime
+        except OSError:
+            self.state = (None, [], {})
+            return self.state
+        if mtime == self.state[0]:
+            return self.state
+        try:
+            with open(self.path, encoding="utf-8") as fh:
+                ops = list(json.load(fh)["operators"].values())
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+            # Keep the last good list, and remember this file was seen, so
+            # it is reported once rather than once for every row of a page.
+            log(WARN, "%s unreadable, keeping the last list: %r" % (self.path, e))
+            self.state = (mtime,) + self.state[1:]
+            return self.state
+        tables = {}
+        for op in ops:
+            for p in op.get("prefixes") or ():
+                try:
+                    net = ipaddress.ip_network(p, strict=False)
+                except (TypeError, ValueError):
+                    continue
+                shift = net.max_prefixlen - net.prefixlen
+                tables.setdefault((net.version, net.prefixlen), {})[
+                    int(net.network_address) >> shift] = op.get("name") or ""
+        # One tuple, swapped in whole: a request thread reading it never sees
+        # the lengths of one file with the tables of another.
+        self.state = (mtime, sorted(tables, key=lambda k: -k[1]), tables)
+        return self.state
+
+    def name(self, ip):
+        """The operator's name; "" for none of them; None with no list yet."""
+        _, lengths, tables = self._tables()
+        if not tables:
+            return None
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return None
+        for version, plen in lengths:
+            if version == addr.version:
+                hit = tables[(version, plen)].get(
+                    int(addr) >> (addr.max_prefixlen - plen))
+                if hit is not None:
+                    return hit
+        return ""
+
+
+OPERATORS = Operators(OPERATORS_FILE)
+
+
+# Letters and digits nobody misreads when a password is read out or copied
+# from a chat: no 0/o, no 1/l/i.
+TEMP_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
+
+
+def temp_password():
+    """Three groups of four - easy to pass on, and about 59 bits."""
+    return "-".join("".join(secrets.choice(TEMP_ALPHABET) for _ in range(4))
+                    for _ in range(3))
+
+
+def temp_password_card(name, password):
+    return ("<div class='card'><h2>رمز موقت «%s»</h2>"
+            "<p class='onetime'><code>%s</code></p>"
+            "<p>این رمز را برای مشتری بفرستید. فقط همین یک بار نشان داده می‌شود.</p>"
+            "<ul class='muted'>"
+            "<li>مشتری از همهٔ دستگاه‌ها بیرون آمد. اینترنتش قطع نشده.</li>"
+            "<li>با اولین ورود باید رمز خودش را انتخاب کند؛ بعد از آن این رمز "
+            "دیگر کار نمی‌کند.</li>"
+            "<li>این صفحه را رفرش نکنید: رفرش یک رمز تازهٔ دیگر می‌سازد.</li></ul>"
+            "<p><a href='/%s/users'>برگشت به کاربران</a></p></div>"
+            % (html.escape(name), html.escape(password),
+               html.escape(CFG["ADMIN_PATH"])))
+
+
+def operator_label(ip):
+    """The line under an address on the users page. "سایر" for an address
+    none of the listed operators announce; nothing at all while there is no
+    list yet - an empty line is honest, a guess is not."""
+    if not ip:
+        return ""
+    name = OPERATORS.name(ip)
+    if name is None:
+        return ""
+    return "<br><span class='muted'>%s</span>" % html.escape(name or "سایر")
+
+
 def page(title, body, cfg, active="", msg=None, msg_kind="good"):
     nav = ""
     for path, label in (("", "خانه"), ("users", "کاربران"), ("receipts", "رسیدها"),
@@ -471,7 +660,8 @@ def page(title, body, cfg, active="", msg=None, msg_kind="good"):
 <link rel="icon" href="data:,">
 <title>%s</title>%s<style>%s</style></head><body>%s<div class="wrap">%s
 <header><h1>%s</h1><nav>%s<a href='/%s/logout'>خروج</a></nav></header>
-%s%s%s</div></body></html>""" % (html.escape(title), THEME_HEAD, CSS,
+%s%s%s</div></body></html>""" % (html.escape(title), THEME_HEAD,
+                                 font_face("/" + cfg["ADMIN_PATH"]) + CSS,
                                  THEME_BUTTON, brand_html(),
                                  html.escape(title), nav, cfg["ADMIN_PATH"],
                                  banner, body, footer_html()))
@@ -491,7 +681,9 @@ def login_page(cfg, error=None):
 <form method="post" action="/%s/"><div class="f"><label>رمز عبور</label>
 <input type="password" name="password" autofocus style="width:100%%"></div>
 <button type="submit" style="width:100%%">ورود</button></form></div>
-</div>%s</div></body></html>""" % (THEME_HEAD, CSS, THEME_BUTTON, brand_html(),
+</div>%s</div></body></html>""" % (THEME_HEAD,
+                                   font_face("/" + cfg["ADMIN_PATH"]) + CSS,
+                                   THEME_BUTTON, brand_html(),
                                    err, cfg["ADMIN_PATH"], footer_html())
 
 
@@ -679,6 +871,21 @@ class Admin(http.server.BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         for k, v in (headers or {}).items():
             self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(blob)
+
+    def send_font(self):
+        """The one thing this panel lets a browser keep: the same file for
+        everybody, and a new version comes at a new address."""
+        blob = font_bytes()
+        if blob is None:
+            return self.send("<h1>404</h1>", 404)
+        self._headers_buffer = []
+        self.send_response(200)
+        self.send_header("Content-Type", "font/woff2")
+        self.send_header("Content-Length", str(len(blob)))
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(blob)
 
@@ -1018,6 +1225,9 @@ class Admin(http.server.BaseHTTPRequestHandler):
         rest = self.route()
         if rest is None:
             return self.lost()
+        # Ahead of the session check: the sign-in page is drawn in it too.
+        if rest == "vazirmatn.woff2":
+            return self.send_font()
         if rest == "logout":
             cookie = http.cookies.SimpleCookie(self.headers.get("Cookie", ""))
             if "sdns" in cookie:
@@ -1175,9 +1385,30 @@ class Admin(http.server.BaseHTTPRequestHandler):
             kbps = r["speed_kbps"] or 0
             speed_mb = ("%g" % (kbps / 1000.0)) if kbps else "0"
             left = remaining_days(r["expires_at"] or r["quota_reset_at"])
+            who = str(r["username"] or r["phone"] or r["telegram_id"]
+                      or "#%d" % r["id"])
+            # Named in the question, so the wrong row is caught before it is
+            # gone. JSON makes it a safe JS string, escaping makes that a safe
+            # attribute - a name is whatever the customer typed.
+            ask = html.escape(json.dumps(
+                "«%s» برای همیشه حذف شود؟ آی‌پی‌ها و رسیدهایش هم پاک می‌شوند "
+                "و برنمی‌گردند." % who, ensure_ascii=False), quote=True)
+            # Only an account with a username signs in on the web, so only
+            # such an account has a password worth replacing.
+            reset = ""
+            if r["username"]:
+                reset = (
+                    "<form method='post' action='/%s/user-password-reset'"
+                    " onsubmit='return confirm(%s)'>"
+                    "<input type='hidden' name='id' value='%d'>"
+                    "<button class='ghost' title='ساختن رمز موقت برای این کاربر'>"
+                    "رمز تازه</button></form>"
+                    % (p, html.escape(json.dumps(
+                        "برای «%s» رمز تازه ساخته شود؟ از همهٔ دستگاه‌ها بیرون "
+                        "می‌آید." % who, ensure_ascii=False), quote=True), r["id"]))
             out.append(
                 "<tr><td><code>%s</code><br><span class='muted'>%s</span></td>"
-                "<td><code>%s</code></td><td>%s</td>"
+                "<td><code>%s</code>%s</td><td>%s</td>"
                 "<td><form id='u%d' method='post' action='/%s/user-save'></form>"
                 "<input form='u%d' type='hidden' name='id' value='%d'>"
                 "<input form='u%d' name='quota_gb' value='%s' size='4'"
@@ -1200,15 +1431,20 @@ class Admin(http.server.BaseHTTPRequestHandler):
                 " onsubmit='return confirm(\"مصرف این کاربر صفر شود؟\")'>"
                 "<input type='hidden' name='id' value='%d'>"
                 "<button class='ghost' title='صفر کردن مصرف'>صفر</button></form>"
+                "%s"
+                "<form method='post' action='/%s/user-delete'"
+                " onsubmit='return confirm(%s)'>"
+                "<input type='hidden' name='id' value='%d'>"
+                "<button class='del' title='حذف همیشگی این کاربر'>حذف</button></form>"
                 "</td></tr>"
                 # What a customer signs in with. Accounts opened before this
                 # was a username have a phone number instead, and the ones
                 # that came through the bot have neither - so the column shows
                 # whichever this account actually has.
-                % (html.escape(str(r["username"] or r["phone"]
-                                   or r["telegram_id"] or "#%d" % r["id"])),
+                % (html.escape(who),
                    html.escape(r["first_name"] or ""),
-                   html.escape(r["ip"] or "-"), human(r["used_bytes"]),
+                   html.escape(r["ip"] or "-"), operator_label(r["ip"]),
+                   human(r["used_bytes"]),
                    r["id"], p, r["id"], r["id"], r["id"], quota_gb,
                    r["id"], speed_mb, r["id"], left,
                    p, r["id"], sel, cls, html.escape(label),
@@ -1218,7 +1454,9 @@ class Admin(http.server.BaseHTTPRequestHandler):
                    "ghost" if r["status"] == "suspended" else "danger",
                    "برگرداندن" if r["status"] == "suspended" else "مسدود کردن",
                    "فعال" if r["status"] == "suspended" else "مسدود",
-                   p, r["id"]))
+                   p, r["id"],
+                   reset,
+                   p, ask, r["id"]))
         out.append("</table><p class='muted'>ثبت‌نام تازه با وضعیت «در انتظار "
                    "پلن» می‌آید و تا وقتی برایش پلن ذخیره نکنید هیچ ترافیکی "
                    "نمی‌گیرد؛ اولین ذخیرهٔ همین سطر فعالش می‌کند. "
@@ -1460,6 +1698,18 @@ class Admin(http.server.BaseHTTPRequestHandler):
             "<p class='muted'>فایل اول فقط بررسی و توصیف می‌شود؛ جایگزینی جدا "
             "تأیید می‌خواهد.</p></div>" % (p, p))
 
+        support = STORE.one("SELECT value FROM settings WHERE key = 'support_contact'")
+        out.append("<div class='card'><h2>پشتیبانی</h2>"
+                   "<form method='post' action='/%s/support-save' class='row'>"
+                   "<input name='contact' value='%s' maxlength='64' "
+                   "placeholder='@your_support' style='min-width:240px;direction:ltr'>"
+                   "<button class='ghost'>ذخیره</button></form>"
+                   "<p class='muted'>زیر فرم ورود مشتری‌ها نوشته می‌شود: «رمز را "
+                   "فراموش کرده‌اید؟ به پشتیبانی پیام دهید» و بعد همین آیدی یا "
+                   "شماره. خالی باشد، همان جمله بدون آیدی می‌آید.</p></div>"
+                   % (p, html.escape(support["value"] if support else "",
+                                     quote=True)))
+
         out.append("<div class='card'><h2>آدرس این پنل</h2>"
                    "<p class='muted'>همین حالا: <code>https://%s:%s/%s/</code></p>"
                    "<div class='f'><label>پورت</label>"
@@ -1627,6 +1877,15 @@ class Admin(http.server.BaseHTTPRequestHandler):
                       " ELSE status END WHERE id = ?", (uid,))
             return self.redirect("users?m=مصرف صفر شد")
 
+        if rest == "user-delete":
+            uid = int(one("id") or 0)
+            ips = STORE.delete_user(uid)
+            if ips is None:
+                return self.redirect("users?m=!این کاربر پیدا نشد")
+            log(INFO, "deleted user #%d and its %d address(es)" % (uid, len(ips)))
+            # The relays learn it at their next sync, like a block does.
+            return self.redirect("users?m=کاربر حذف شد؛ تا ۳۰ ثانیه دیگر قطع می‌شود")
+
         if rest == "user-template":
             STORE.run("UPDATE users SET template_id = ? WHERE id = ?",
                       (int(one("template_id") or 0), int(one("id") or 0)))
@@ -1771,6 +2030,34 @@ class Admin(http.server.BaseHTTPRequestHandler):
             set_config_key("ADMIN_PATH", new)
             CFG["ADMIN_PATH"] = new
             return self.moving_to(CFG["ADMIN_PORT"], new)
+
+        if rest == "user-password-reset":
+            uid = int(one("id") or 0)
+            user = STORE.one("SELECT username FROM users WHERE id = ?", (uid,))
+            if not user:
+                return self.redirect("users?m=!این کاربر پیدا نشد")
+            if not user["username"]:
+                return self.redirect("users?m=!این حساب نام کاربری ندارد و از "
+                                     "پنل وارد نمی‌شود")
+            password = temp_password()
+            if not STORE.reset_password(uid, password):
+                return self.redirect("users?m=!نشد، دوباره امتحان کنید")
+            log(INFO, "temporary password for user #%d; its sign-ins closed" % uid)
+            # On this page and nowhere else. Not in a redirect: the message
+            # rides in the address, and the address stays in the history.
+            return self.send(page("رمز موقت",
+                                  temp_password_card(user["username"], password),
+                                  CFG, "users"))
+
+        if rest == "support-save":
+            contact = " ".join(one("contact").split())
+            if len(contact) > 64:
+                return self.redirect("settings?m=!حداکثر ۶۴ نویسه")
+            STORE.run("INSERT INTO settings (key, value) VALUES ('support_contact', ?)"
+                      " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                      (contact,))
+            return self.redirect("settings?m=ذخیره شد؛ تا ۳۰ ثانیه دیگر زیر "
+                                 "فرم ورود مشتری‌ها می‌آید")
 
         if rest == "password":
             new = one("password")

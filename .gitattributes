@@ -2,3 +2,4 @@
 # shell script on Linux, and CRLF would break the shebang and every heredoc.
 * text=auto eol=lf
 *.png binary
+*.woff2 binary

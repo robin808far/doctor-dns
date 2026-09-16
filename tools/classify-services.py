@@ -147,9 +147,12 @@ BRANDS = [
     ("adobe", "Adobe", [("main", "همه", ["adobe"])]),
     ("nvidia", "NVIDIA", [("main", "همه", ["nvidia", "geforce"])]),
     ("apple", "Apple", [("main", "همه", ["apple.com"])]),
+    # gvt1 and ggpht are Play Store's: app downloads and updates, and the
+    # icons and screenshots. Not mtalk.google.com - notifications run on
+    # port 5228, which the relay does not carry.
     ("google", "Google", [("main", "همه", [
         "google", "youtube", "gemini", "gstatic", "doubleclick", "admob",
-        "recaptcha", "withgoogle"])]),
+        "recaptcha", "withgoogle", "gvt1", "ggpht"])]),
     ("discord", "Discord", [("main", "همه", ["discord"])]),
     ("slackzoom", "Slack / Zoom / Teams", [("main", "همه", [
         "slack", "zoom.us", "jitsi"])]),

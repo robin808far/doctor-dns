@@ -70,7 +70,7 @@ class Api:
         self.store = store
 
 
-for name in ("do_user_receipt", "_session_user"):
+for name in ("do_user_receipt", "_session_user", "_must_choose"):
     setattr(Api, name, getattr(panel.API, name))
 api = Api(store)
 

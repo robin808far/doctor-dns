@@ -252,6 +252,9 @@ MIGRATIONS = [
     # every account that predates this gets.
     ("users", "speed_kbps", "INTEGER NOT NULL DEFAULT 0"),
     ("users", "expires_at", "TEXT"),
+    # Set when the operator hands out a temporary password: until the
+    # customer has chosen their own, that is all their account lets them do.
+    ("users", "must_change_password", "INTEGER NOT NULL DEFAULT 0"),
     ("transactions", "receipt_blob", "BLOB"),
     ("transactions", "receipt_type", "TEXT"),
     ("transactions", "note", "TEXT"),
@@ -701,8 +704,11 @@ class Store:
 
     def set_password(self, user_id, password):
         salt = secrets.token_hex(16)
-        self.run("UPDATE users SET password_hash = ?, password_salt = ?"
-                 " WHERE id = ?", (hash_password(password, salt), salt, user_id))
+        # A password the customer set is their own, so any temporary one is
+        # over - whichever of the two forms it came through.
+        self.run("UPDATE users SET password_hash = ?, password_salt = ?,"
+                 " must_change_password = 0 WHERE id = ?",
+                 (hash_password(password, salt), salt, user_id))
 
     def open_session(self, user_id, days=30):
         token = secrets.token_urlsafe(32)
@@ -1384,6 +1390,9 @@ class API(http.server.BaseHTTPRequestHandler):
             return self.reply(200, {"allowed": allowed, "profiles": profiles,
                                     "extra_domains": extra,
                                     "templates": self.store.template_names(),
+                                    # Written under the sign-in form, for
+                                    # whoever has forgotten their password.
+                                    "support": self.store.setting("support_contact"),
                                     })
 
         # ---- user panel, served by the relay on the customer's behalf ----
@@ -1399,6 +1408,8 @@ class API(http.server.BaseHTTPRequestHandler):
             return self.reply(200, self.do_user_receipt(body))
         if self.path == "/user-password":
             return self.reply(200, self.do_user_password(body))
+        if self.path == "/user-password-first":
+            return self.reply(200, self.do_user_password_first(body))
 
         return self.reply(404, {"error": "no such endpoint"})
 
@@ -1477,7 +1488,40 @@ class API(http.server.BaseHTTPRequestHandler):
         THROTTLE.clear("login:%s" % ip)
         self._who = "user #%d" % user["id"]
         log(INFO, "api login: user #%d (%s) from %s" % (user["id"], username, ip))
-        return {"ok": True, "session": self.store.open_session(user["id"])}
+        return {"ok": True, "session": self.store.open_session(user["id"]),
+                "must_change": bool(user["must_change_password"])}
+
+    def _must_choose(self, user):
+        """The refusal for an account still on a temporary password, or None."""
+        if user["must_change_password"]:
+            return {"ok": False, "message": "اول رمز خودتان را انتخاب کنید"}
+        return None
+
+    def do_user_password_first(self, body):
+        """Replace a temporary password with the customer's own.
+
+        Only for an account the operator has just given a temporary password.
+        The session came from signing in with it, which is the proof; asking
+        for it again would only mean typing it twice. Once the customer's own
+        is set, the temporary one is gone and this door is shut.
+        """
+        user = self._session_user(body.get("session"))
+        if not user:
+            return {"ok": False, "message": "نشست معتبر نیست"}
+        if not user["must_change_password"]:
+            return {"ok": False, "message":
+                    "رمز شما قبلاً انتخاب شده؛ برای عوض کردنش از «تغییر رمز» استفاده کنید"}
+        new = body.get("new") or ""
+        if len(new) < 8:
+            return {"ok": False, "message": "رمز تازه باید دست‌کم ۸ نویسه باشد"}
+        if check_password(user, new):
+            return {"ok": False, "message": "رمز تازه نباید همان رمز موقت باشد"}
+        self.store.set_password(user["id"], new)
+        self.store.run(
+            "DELETE FROM panel_sessions WHERE user_id = ? AND token != ?",
+            (user["id"], body.get("session")))
+        log(INFO, "user #%d chose their own password" % user["id"])
+        return {"ok": True, "message": "رمز شما ذخیره شد"}
 
     def do_user_password(self, body):
         """Let a customer change their own password.
@@ -1533,6 +1577,8 @@ class API(http.server.BaseHTTPRequestHandler):
         user = self._session_user(body.get("session"))
         if not user:
             return {"ok": False, "message": "نشست معتبر نیست"}
+        if self._must_choose(user):
+            return self._must_choose(user)
 
         kind = (body.get("content_type") or "").split(";")[0].strip().lower()
         if kind not in ("image/jpeg", "image/png", "image/webp", "application/pdf"):
@@ -1577,6 +1623,8 @@ class API(http.server.BaseHTTPRequestHandler):
         user = self._session_user(body.get("session"))
         if not user:
             return {"ok": False, "message": "نشست معتبر نیست"}
+        if self._must_choose(user):
+            return self._must_choose(user)
         ip = body.get("ip", "")
         if not valid_ip(ip):
             return {"ok": False, "message": "آی‌پی نامعتبر"}
@@ -1624,6 +1672,7 @@ class API(http.server.BaseHTTPRequestHandler):
             # page turns this into the banner the bot used to send.
             "warned": user["warned"] or 0,
             "seen_ip": body.get("ip", ""),
+            "must_change": bool(user["must_change_password"]),
         }
 
 

@@ -49,7 +49,7 @@ case "${1:-}" in
         echo "already bypassed: $d"
       else
         printf 'server=/%s/1.1.1.1
-server=/%s/8.8.8.8
+server=/%s/9.9.9.9
 ' "$d" "$d" >> "$BYPASS"
         echo "bypassed (resolves to its real IP now): $d"
       fi

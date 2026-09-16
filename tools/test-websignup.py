@@ -135,7 +135,8 @@ class FakeHandler:
 
 api = FakeHandler(store)
 for name in ("do_user_signup", "do_user_password_login", "do_user_claim",
-             "do_user_info", "do_claim_register", "_session_user"):
+             "do_user_info", "do_claim_register", "_session_user",
+             "_must_choose"):
     setattr(FakeHandler, name, getattr(panel.API, name))
 
 CATALOGUE = panel.load_catalogue() + [panel.CUSTOM_SERVICE]

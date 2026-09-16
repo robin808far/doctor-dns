@@ -290,6 +290,14 @@ but travels in every request line and lands in any proxy log on the way. The
 password is never stored — only a salted hash — which is why a forgotten one
 is replaced rather than recovered.
 
+Customers' passwords work the same way. When one forgets theirs, press *new
+password* on the users page: a temporary password is made and shown once, and
+the customer is signed out everywhere without losing their connection. Send it
+to them; the first sign-in with it asks for a password of their own, and the
+account can do nothing else until then. A contact set under *Settings →
+Support* is written beneath the customers' sign-in form, so they know whom to
+ask.
+
 ### On the relay
 
 **`smartdns`** — the list of domains that go through the relay.
@@ -548,6 +556,12 @@ reach the service from.
   between the relay and the exit. It is his work, released under the AGPL-3.0:
   this project only downloads his own unmodified releases, checks them against
   a pinned hash, and runs them. Thank you, Amin.
+- **[Vazirmatn](https://github.com/rastikerdar/vazirmatn)**, by **Saber Rastikerdar**,
+  is the font of both panels. It is released under the SIL Open Font License 1.1
+  and travels inside the installer with its licence. With thanks to him and the
+  Vazirmatn project.
+- The operator shown for each customer in the admin panel comes from
+  [RIPEstat](https://stat.ripe.net/), RIPE NCC's public routing data.
 - The exit's nginx configuration started from
   [rohammosalli/smart-dns](https://github.com/rohammosalli/smart-dns).
 

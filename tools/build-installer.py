@@ -10,9 +10,13 @@ braces and dnsmasq syntax make the parser choke even though the data sits after
 exit 0 and would never run. The alternative, base64, would pass the check too but
 leave a reviewer unable to read the configs they are about to run as root.
 
+The one exception is the panels' font, which is binary and goes in as base64.
+Nobody reviews a font by reading it; its hash is checked by the tests instead.
+
 This script is the single source of truth in the other direction: edit the files
 under templates/ and common/, then re-run this to regenerate doctor-dns.sh.
 """
+import base64
 import io
 import os
 
@@ -60,9 +64,23 @@ PAYLOADS = [
     ("EPIC_PIN", "templates/epic-pin"),
     ("EPIC_PIN_SERVICE", "templates/epic-pin.service"),
     ("EPIC_PIN_TIMER", "templates/epic-pin.timer"),
+    ("OPERATORS", "templates/smartdns-operators"),
+    ("OPERATORS_SERVICE", "templates/smartdns-operators.service"),
+    ("OPERATORS_TIMER", "templates/smartdns-operators.timer"),
+    ("FONT_LICENSE", "common/fonts/OFL.txt"),
     ("DOMAINS", "domains/domains.txt"),
     ("SERVICES", "domains/services.json"),
 ]
+
+# Binary payloads, carried as base64 and decoded by the installer.
+BINARY_PAYLOADS = [
+    ("FONT", "common/fonts/Vazirmatn[wght].woff2"),
+]
+
+
+def read_binary(rel):
+    with open(os.path.join(ROOT, rel), "rb") as fh:
+        return base64.encodebytes(fh.read()).decode("ascii").rstrip("\n")
 
 
 def main():
@@ -70,8 +88,8 @@ def main():
     parts = [logic, "", "# " + "=" * 68,
              "# Config payloads. Everything below is data, never executed.",
              "# " + "=" * 68, ""]
-    for name, path in PAYLOADS:
-        body = read(path)
+    for name, path in PAYLOADS + BINARY_PAYLOADS:
+        body = read_binary(path) if (name, path) in BINARY_PAYLOADS else read(path)
         # relay-nginx.conf carries MODULE_PATH; the installer fills it in after
         # writing, so normalise it to the same placeholder style as the rest.
         if name == "RELAY_NGINX":
@@ -98,7 +116,8 @@ def main():
         fh.write(text)
     os.chmod(dest, 0o755)
     print("wrote doctor-dns.sh: %d lines, %d KB, %d payloads"
-          % (text.count("\n") + 1, len(text) // 1024, len(PAYLOADS)))
+          % (text.count("\n") + 1, len(text) // 1024,
+             len(PAYLOADS) + len(BINARY_PAYLOADS)))
 
 
 if __name__ == "__main__":
