@@ -38,7 +38,7 @@ STAMP="$(date +%Y%m%d-%H%M%S)"
 # What this file is. Written to the machine once an install finishes, so the
 # next run can tell whether it is an upgrade, a re-run, or somebody about to
 # put an older version over a newer one by accident.
-VERSION="0.5.4"
+VERSION="0.5.5"
 
 # What this install did, so uninstall can undo exactly that and nothing more.
 # Without it, removal would be guesswork: whether dnsmasq was ours or already
@@ -12074,6 +12074,23 @@ exit 0
 #            "minecraft.net",
 #            "minecraftservices.com",
 #            "mojang.com"
+#          ]
+#        }
+#      ]
+#    },
+#    {
+#      "key": "pubgmobile",
+#      "label": "PUBG Mobile",
+#      "groups": [
+#        {
+#          "key": "main",
+#          "label": "همه",
+#          "opt_in": true,
+#          "note": "مستقیم کار می‌کند؛ فقط برای مشتری‌های اپراتوری روشن کنید که بازی رویش باز نمی‌شود — آپدیت‌های بازی هم از سرورها رد می‌شود",
+#          "domains": [
+#            "gcloudcs.com",
+#            "igamecj.com",
+#            "pubgmobile.com"
 #          ]
 #        }
 #      ]

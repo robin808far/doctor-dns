@@ -255,6 +255,23 @@
       ]
     },
     {
+      "key": "pubgmobile",
+      "label": "PUBG Mobile",
+      "groups": [
+        {
+          "key": "main",
+          "label": "همه",
+          "opt_in": true,
+          "note": "مستقیم کار می‌کند؛ فقط برای مشتری‌های اپراتوری روشن کنید که بازی رویش باز نمی‌شود — آپدیت‌های بازی هم از سرورها رد می‌شود",
+          "domains": [
+            "gcloudcs.com",
+            "igamecj.com",
+            "pubgmobile.com"
+          ]
+        }
+      ]
+    },
+    {
       "key": "othergames",
       "label": "بازی‌های دیگر",
       "groups": [

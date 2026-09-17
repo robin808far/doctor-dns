@@ -49,7 +49,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Groups that exist so they can be seen and chosen, never so they can happen
 # by default.
 OPT_IN = {"bypass.ea", "bypass.playstation", "bypass.epic",
-          "bypass.azure"}
+          "bypass.azure", "pubgmobile.main"}
 
 EXPLICIT = {
     "playstation.download": [
@@ -64,6 +64,13 @@ EXPLICIT = {
     # can see them and decide, and marked opt-in below so that deciding
     # nothing leaves them alone. Same list epic-pin works from.
     "bypass.epic": ['account-public-service-prod.ol.epicgames.com', 'datarouter.ol.epicgames.com', 'launcher-public-service-prod06.ol.epicgames.com', 'links-public-service-live.ol.epicgames.com', 'events-public-service-live.ol.epicgames.com', 'datastorage-public-service-live.ol.epicgames.com', 'data-asset-directory-public-service-prod.ol.epicgames.com', 'fortnitecontent-website-prod07.ol.epicgames.com', 'fortnite-public-service-prod11.ol.epicgames.com', 'mcp-gc.live.fngw.ol.epicgames.com', 'gc.svc.live.fngw.ol.epicgames.com', 'ds.svc.live.fngw.ol.epicgames.com', 'fngw-svc-ds-livefn.ol.epicgames.com', 'fn-service-habanero-live-public.ogs.live.on.epicgames.com', 'fn-service-discovery-live-public.ogs.live.on.epicgames.com', 'prm-dialogue-public-api-prod.edea.live.use1a.on.epicgames.com'],
+    # PUBG Mobile's own names on 443. They work direct on most lines, so they
+    # are not in domains.txt - the shared list the default plan is served
+    # from - and the group is opt-in: an operator ticks it in a template for
+    # the customers of an operator that blocks them. Its telemetry
+    # (tdatamaster.com, 8013) and login (proximabeta.com, 8085/8086) are not
+    # here at all: the relay carries 80 and 443 only.
+    "pubgmobile.main": ["gcloudcs.com", "igamecj.com", "pubgmobile.com"],
     "xbox.download": [
         "dl.delivery.mp.microsoft.com",
         "assets1.xboxlive.com",
@@ -112,6 +119,8 @@ BRANDS = [
     ("gog", "GOG / itch.io", [("main", "همه", ["gog.com", "itch.io", "humblebundle"])]),
     ("roblox", "Roblox", [("main", "همه", ["roblox", "rbxcdn"])]),
     ("minecraft", "Minecraft", [("main", "همه", ["minecraft", "mojang"])]),
+    # Its domains come from EXPLICIT, not from matching - see there.
+    ("pubgmobile", "PUBG Mobile", [("main", "همه", [])]),
     ("othergames", "بازی‌های دیگر", [("main", "همه", [
         "pubg", "krafton", "hoyoverse", "mihoyo", "supercell", "garena",
         "faceit", "battlecode", "unity", "vuforia", "incredibuild"])]),
